@@ -1,50 +1,45 @@
 // Command preparer builds the bareboot boot media.
-// For now it writes a bootable disk image: GPT + ESP (FAT32) + BOOTX64.EFI.
+//
+//	preparer list            show the disks and which ones are safe targets
+//	preparer image [flags]   write a bootable disk image (GPT + FAT32 + BOOTX64.EFI)
 package main
 
 import (
-	"flag"
 	"fmt"
 	"os"
-
-	"bareboot/preparer/internal/gpt"
 )
 
-func main() {
-	out := flag.String("o", "../build/bareboot.img", "output image file")
-	efi := flag.String("efi", "../build/esp/EFI/BOOT/BOOTX64.EFI", "UEFI boot program to install")
-	flag.Parse()
+const usage = `bareboot preparer
 
-	bootProgram, err := os.ReadFile(*efi)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "error: cannot read boot program (run boot\\build.ps1 first):", err)
-		os.Exit(1)
+Usage:
+  preparer list              list disks and whether each one can be used
+  preparer image [flags]     build a bootable disk image file
+
+Run "preparer <command> -h" for the flags of a command.
+`
+
+func main() {
+	if len(os.Args) < 2 {
+		fmt.Fprint(os.Stderr, usage)
+		os.Exit(2)
 	}
 
-	if err := buildImage(*out, bootProgram); err != nil {
+	var err error
+	switch cmd, args := os.Args[1], os.Args[2:]; cmd {
+	case "list":
+		err = runList(args)
+	case "image":
+		err = runImage(args)
+	case "-h", "--help", "help":
+		fmt.Print(usage)
+		return
+	default:
+		fmt.Fprintf(os.Stderr, "unknown command %q\n\n%s", cmd, usage)
+		os.Exit(2)
+	}
+
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
-	fmt.Printf("image written: %s (%d-byte boot program)\n", *out, len(bootProgram))
-}
-
-func buildImage(path string, bootProgram []byte) (err error) {
-	f, err := os.Create(path)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if cerr := f.Close(); err == nil {
-			err = cerr
-		}
-	}()
-
-	// Give the file its final size; unwritten areas read back as zeros.
-	if err := f.Truncate(MinDiskSize); err != nil {
-		return err
-	}
-	if err := writeMedia(f, MinDiskSize/gpt.SectorSize, bootProgram); err != nil {
-		return err
-	}
-	return f.Sync()
 }
