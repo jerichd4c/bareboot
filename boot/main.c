@@ -46,9 +46,8 @@ EFI_STATUS EFIAPI efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable
     print(u"  Programa de arranque propio, sin sistema operativo.\r\n", COLOR_TEXT);
     print(u"  Universidad Rafael Urdaneta - Sistemas Operativos\r\n\r\n", COLOR_TEXT);
 
-    print(u"  Integrantes:\r\n",          COLOR_LABEL);
-    print(u"    - Nombre Apellido 1\r\n", COLOR_TEXT);
-    print(u"    - Nombre Apellido 2\r\n\r\n", COLOR_TEXT);
+    print(u"  Autor: ",                COLOR_LABEL);
+    print(u"Sebastian Cohen\r\n\r\n",  COLOR_TEXT);
 
     print(u"  Firmware: ", COLOR_LABEL);
     print(SystemTable->FirmwareVendor, COLOR_TEXT);

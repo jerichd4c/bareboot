@@ -55,7 +55,10 @@ $offset = $first * 512
 # 3. File system: fsck.vfat needs the partition alone, so copy it out with dd
 $espFile = Join-Path (Split-Path $Image -Parent) 'esp-check.img'
 $esp     = ConvertTo-WslPath $espFile
-Invoke-Wsl dd "if=$img" "of=$esp" bs=512 "skip=$first" "count=$count" status=none
+# 1 MiB blocks with byte offsets: with bs=512 dd makes 131072 tiny writes
+# across the WSL <-> Windows file bridge, which can take minutes.
+Invoke-Wsl dd "if=$img" "of=$esp" bs=1M "skip=$offset" "count=$($count * 512)" `
+    'iflag=skip_bytes,count_bytes' status=none  # quoted: a bare comma makes a PowerShell array
 $fsck = (Invoke-Wsl fsck.vfat -n -v $esp) -join "`n"
 $fsckOk = $LASTEXITCODE -eq 0
 Remove-Item $espFile -ErrorAction SilentlyContinue
