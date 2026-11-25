@@ -11,8 +11,8 @@ import (
 // runImage implements "preparer image": writes the boot media to a file.
 func runImage(args []string) error {
 	fl := flag.NewFlagSet("image", flag.ExitOnError)
-	out := fl.String("o", "../build/bareboot.img", "output image file")
-	efi := fl.String("efi", "../build/esp/EFI/BOOT/BOOTX64.EFI", "UEFI boot program to install")
+	out := fl.String("o", defaultImagePath(), "output image file")
+	efi := fl.String("efi", defaultEFIPath(), "UEFI boot program to install")
 	fl.Parse(args)
 
 	bootProgram, err := os.ReadFile(*efi)

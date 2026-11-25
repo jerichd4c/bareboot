@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"golang.org/x/sys/windows"
@@ -48,25 +49,10 @@ func List() ([]Disk, error) {
 	return disks, nil
 }
 
-// Get returns fresh information about one disk. It is called again right
-// before writing, so a disk swapped after listing is detected.
-func Get(number int) (Disk, error) {
-	disks, err := List()
-	if err != nil {
-		return Disk{}, err
-	}
-	for _, d := range disks {
-		if d.Number == number {
-			return d, nil
-		}
-	}
-	return Disk{}, fmt.Errorf("disk %d not found (unplugged or wrong number)", number)
-}
-
 // query opens \\.\PhysicalDriveN without read/write access (metadata only)
 // and asks the storage driver for its identity and geometry.
 func query(n int) (Disk, error) {
-	d := Disk{Number: n, Path: fmt.Sprintf(`\\.\PhysicalDrive%d`, n)}
+	d := Disk{ID: strconv.Itoa(n), Path: fmt.Sprintf(`\\.\PhysicalDrive%d`, n)}
 	h, err := openDevice(d.Path)
 	if err != nil {
 		return d, err

@@ -32,8 +32,8 @@ func runList(args []string) error {
 		} else {
 			eligible++
 		}
-		fmt.Fprintf(tw, "%d\t%s\t%s\t%s\t%s\t%s\t%s\n",
-			d.Number, d.Bus, disk.FormatSize(d.Size), orDash(d.Model()), orDash(d.Serial),
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
+			d.ID, d.Bus, disk.FormatSize(d.Size), orDash(d.Model()), orDash(d.Serial),
 			orDash(strings.Join(d.Volumes, " ")), status)
 	}
 	if err := tw.Flush(); err != nil {

@@ -2,6 +2,10 @@
 //
 //	preparer list            show the disks and which ones are safe targets
 //	preparer image [flags]   write a bootable disk image (GPT + FAT32 + BOOTX64.EFI)
+//	preparer write -disk ID  prepare a USB drive (administrator/root only)
+//
+// It builds for Windows (Win32 API) and Linux (sysfs + syscalls); only the
+// internal/disk package differs between the two.
 package main
 
 import (
@@ -14,6 +18,7 @@ const usage = `bareboot preparer
 Usage:
   preparer list              list disks and whether each one can be used
   preparer image [flags]     build a bootable disk image file
+  preparer write -disk ID    prepare a USB disk (administrator / root)
 
 Run "preparer <command> -h" for the flags of a command.
 `
@@ -30,6 +35,8 @@ func main() {
 		err = runList(args)
 	case "image":
 		err = runImage(args)
+	case "write":
+		err = runWrite(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return

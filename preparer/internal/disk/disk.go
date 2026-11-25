@@ -1,8 +1,9 @@
 // Package disk finds the physical disks of the machine, describes them and
 // decides whether one is a safe target for bareboot.
 //
-// The OS-specific part (asking Windows about each disk) lives in
-// disk_windows.go; this file only holds the data and the safety rules.
+// The OS-specific part (asking the operating system about each disk) lives in
+// disk_windows.go and disk_linux.go; this file only holds the data and the
+// safety rules, which are the same on every system.
 package disk
 
 import (
@@ -10,10 +11,18 @@ import (
 	"strings"
 )
 
-// BusType is how the disk is connected (STORAGE_BUS_TYPE in the Windows SDK).
+// BusType is how the disk is connected. The values are the Windows SDK's
+// STORAGE_BUS_TYPE; the Linux backend maps what it finds in sysfs onto them.
 type BusType uint32
 
-const BusUSB BusType = 7
+const (
+	BusUnknown BusType = 0
+	BusSCSI    BusType = 1
+	BusUSB     BusType = 7
+	BusSATA    BusType = 11
+	BusVirtual BusType = 14
+	BusNVMe    BusType = 17
+)
 
 var busNames = map[BusType]string{
 	0: "Unknown", 1: "SCSI", 2: "ATAPI", 3: "ATA", 4: "1394", 5: "SSA",
@@ -31,8 +40,8 @@ func (b BusType) String() string {
 
 // Disk is everything we know about one physical disk.
 type Disk struct {
-	Number     int    // N in \\.\PhysicalDriveN
-	Path       string // device path used to open the disk
+	ID         string // short name the user types: "1" on Windows, "sde" on Linux
+	Path       string // device path used to open it: \\.\PhysicalDrive1, /dev/sde
 	Vendor     string // as reported by the device itself
 	Product    string
 	Serial     string
@@ -40,8 +49,33 @@ type Disk struct {
 	Removable  bool     // removable media flag (many USB disks report false)
 	Size       int64    // bytes; 0 when there is no media (empty card reader)
 	SectorSize uint32   // logical sector size in bytes
-	Volumes    []string // drive letters of volumes on this disk, e.g. "E:"
-	System     bool     // holds the running Windows installation
+	Volumes    []string // mounted volumes: drive letters ("E:") or mount points
+	System     bool     // holds the running operating system
+}
+
+// Get returns fresh information about one disk. It is called again right
+// before writing, so a disk swapped after listing is detected.
+// id may be written as "1", "PhysicalDrive1", "sde" or "/dev/sde".
+func Get(id string) (Disk, error) {
+	id = normalizeID(id)
+	disks, err := List()
+	if err != nil {
+		return Disk{}, err
+	}
+	for _, d := range disks {
+		if d.ID == id {
+			return d, nil
+		}
+	}
+	return Disk{}, fmt.Errorf("disk %q not found (unplugged or wrong name)", id)
+}
+
+func normalizeID(id string) string {
+	id = strings.TrimSpace(id)
+	for _, prefix := range []string{"/dev/", `\\.\`, "PhysicalDrive"} {
+		id = strings.TrimPrefix(id, prefix)
+	}
+	return id
 }
 
 // Model returns vendor and product joined, or "" if the device reported neither.
@@ -49,12 +83,19 @@ func (d Disk) Model() string {
 	return strings.TrimSpace(d.Vendor + " " + d.Product)
 }
 
+// SameDevice reports whether other still describes the same physical device
+// as d (used to detect a drive swapped between confirmation and writing).
+func (d Disk) SameDevice(other Disk) bool {
+	return d.ID == other.ID && d.Bus == other.Bus && d.Size == other.Size &&
+		d.Vendor == other.Vendor && d.Product == other.Product && d.Serial == other.Serial
+}
+
 // Problems lists every reason why d must not be written. An empty result
 // means the disk is an eligible target. minSize is the smallest usable disk.
 func (d Disk) Problems(minSize int64, sectorSize uint32) []string {
 	var p []string
 	if d.System {
-		p = append(p, "system disk (holds Windows)")
+		p = append(p, "system disk (holds the running OS)")
 	}
 	if d.Bus != BusUSB {
 		p = append(p, fmt.Sprintf("not a USB disk (bus: %s)", d.Bus))
