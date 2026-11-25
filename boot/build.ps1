@@ -15,7 +15,10 @@ clang -target x86_64-unknown-windows -ffreestanding -fshort-wchar -mno-red-zone 
       -c $src -o $obj
 if ($LASTEXITCODE -ne 0) { throw 'Compilation failed' }
 
-lld-link -subsystem:efi_application -entry:efi_main -nodefaultlib "-out:$efi" $obj
+# /Brepro: reproducible build. Without it the linker writes the current time
+# into the PE header, so every build is a different file and a prepared USB
+# could never be compared with the compiled program.
+lld-link -subsystem:efi_application -entry:efi_main -nodefaultlib /Brepro "-out:$efi" $obj
 if ($LASTEXITCODE -ne 0) { throw 'Linking failed' }
 
 Write-Host "OK: $efi"

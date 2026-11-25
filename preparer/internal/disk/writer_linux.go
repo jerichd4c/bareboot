@@ -73,6 +73,19 @@ func (w *Writer) Sync() error {
 	return nil
 }
 
+// DropCache discards the kernel's cached copy of the disk (ioctl BLKFLSBUF),
+// so the next reads come from the device itself. Without it a read-back
+// verification could just read our own data back from RAM.
+func (w *Writer) DropCache() error { return DropCache(w.file) }
+
+// DropCache does the same for any open disk device (root only).
+func DropCache(f *os.File) error {
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, f.Fd(), unix.BLKFLSBUF, 0); errno != 0 {
+		return fmt.Errorf("dropping the disk cache: %w", errno)
+	}
+	return nil
+}
+
 // Close flushes, asks the kernel to re-read the new partition table and
 // closes the device. The first error is returned.
 func (w *Writer) Close() error {

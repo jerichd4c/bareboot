@@ -2,10 +2,12 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"strings"
 
 	"bareboot/preparer/internal/disk"
@@ -16,7 +18,8 @@ import (
 // boot media. Every step that can destroy data is guarded:
 //
 //	admin check -> fresh disk info + safety rules -> summary -> typed
-//	confirmation -> identity re-check -> lock/unmount -> write -> flush
+//	confirmation -> identity re-check -> lock/unmount -> write -> flush ->
+//	read-back + structure verification
 func runWrite(args []string) error {
 	fl := flag.NewFlagSet("write", flag.ExitOnError)
 	id := fl.String("disk", "", `disk to prepare, as shown by "preparer list" (e.g. 1 or sde)`)
@@ -66,8 +69,12 @@ func runWrite(args []string) error {
 		return errors.New("the disk changed since it was shown (unplugged or replaced); nothing was written")
 	}
 
-	// 6. Write.
-	return writeDisk(current, bootProgram)
+	// 6. Write and verify. From here on Ctrl+C no longer kills the process:
+	//    it is turned into a cancellation that stops cleanly between writes,
+	//    closes the device and reports the drive as NOT prepared.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	return writeDisk(ctx, current, bootProgram)
 }
 
 func printSummary(d disk.Disk, bootSize int) {
@@ -100,7 +107,7 @@ func confirm(phrase string) bool {
 	return strings.TrimSpace(line) == phrase
 }
 
-func writeDisk(d disk.Disk, bootProgram []byte) (err error) {
+func writeDisk(ctx context.Context, d disk.Disk, bootProgram []byte) (err error) {
 	diskSectors := uint64(d.Size) / gpt.SectorSize
 
 	// Dry run: measure how many bytes will be written, for the progress bar.
@@ -120,25 +127,41 @@ func writeDisk(d disk.Disk, bootProgram []byte) (err error) {
 			err = cerr
 		}
 		if err != nil {
-			fmt.Println("\nThe preparation did NOT complete. The drive is not bootable;")
-			fmt.Println("fix the problem and run the command again.")
+			fmt.Println("\nThe preparation did NOT complete and the drive is NOT verified.")
+			fmt.Println("It must not be used: fix the problem and run the command again.")
 		}
 	}()
 
-	fmt.Println("Writing boot media...")
-	pw := &progressWriter{target: w, total: counter.total}
+	// [1/3] Write. The chain is: progress bar -> recorder -> device.
+	fmt.Println("[1/3] Writing boot media...")
+	rec := &recordingWriter{target: w}
+	pw := &progressWriter{ctx: ctx, target: rec, total: counter.total}
 	if err := writeMedia(pw, diskSectors, bootProgram); err != nil {
+		fmt.Println()
 		return err
 	}
 	fmt.Println()
 
-	fmt.Println("Flushing pending writes to the device...")
+	// [2/3] Complete the pending writes before reading anything back.
+	fmt.Println("[2/3] Flushing pending writes to the device...")
 	if err := w.Sync(); err != nil {
 		return err
 	}
+	if err := w.DropCache(); err != nil {
+		return err
+	}
 
-	fmt.Printf("Done: %s written to disk %s.\n", formatBytes(counter.total), d.ID)
-	fmt.Println("(Read-back verification is not implemented yet: the drive is written but NOT verified.)")
+	// [3/3] Verify: first the raw bytes, then the structures as a firmware sees them.
+	fmt.Println("[3/3] Verifying...")
+	if err := verifyWritten(w, rec.regions); err != nil {
+		return fmt.Errorf("verification failed: %w", err)
+	}
+	if err := verifyStructure(w, diskSectors, bootProgram); err != nil {
+		return fmt.Errorf("verification failed: %w", err)
+	}
+
+	fmt.Printf("\nDone: disk %s prepared and verified (%s written).\n", d.ID, formatBytes(counter.total))
+	fmt.Println("It can now boot the bareboot program on a UEFI machine (Secure Boot off).")
 	return nil
 }
 

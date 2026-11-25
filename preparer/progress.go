@@ -1,11 +1,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"io"
 	"strings"
 	"sync"
 )
+
+// errCancelled is returned when the user presses Ctrl+C during the writing.
+var errCancelled = errors.New("cancelled by the user (Ctrl+C)")
 
 // countingWriter accepts writes without storing them and only adds up their
 // size. Running writeMedia against it first tells us how many bytes the real
@@ -20,7 +25,10 @@ func (c *countingWriter) WriteAt(p []byte, _ int64) (int, error) {
 }
 
 // progressWriter passes every write to the real target and redraws a bar.
+// Before each write it checks ctx, so Ctrl+C stops between two writes
+// instead of killing the process in the middle of one.
 type progressWriter struct {
+	ctx    context.Context
 	target io.WriterAt
 	total  int64
 	done   int64
@@ -28,6 +36,9 @@ type progressWriter struct {
 }
 
 func (pw *progressWriter) WriteAt(p []byte, off int64) (int, error) {
+	if pw.ctx.Err() != nil {
+		return 0, errCancelled
+	}
 	n, err := pw.target.WriteAt(p, off)
 	pw.mu.Lock()
 	pw.done += int64(n)

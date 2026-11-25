@@ -3,6 +3,7 @@
 //	preparer list            show the disks and which ones are safe targets
 //	preparer image [flags]   write a bootable disk image (GPT + FAT32 + BOOTX64.EFI)
 //	preparer write -disk ID  prepare a USB drive (administrator/root only)
+//	preparer verify ...      check a prepared disk or image without writing
 //
 // It builds for Windows (Win32 API) and Linux (sysfs + syscalls); only the
 // internal/disk package differs between the two.
@@ -19,6 +20,8 @@ Usage:
   preparer list              list disks and whether each one can be used
   preparer image [flags]     build a bootable disk image file
   preparer write -disk ID    prepare a USB disk (administrator / root)
+  preparer verify -disk ID   check a prepared disk without writing
+  preparer verify -image F   check an image file
 
 Run "preparer <command> -h" for the flags of a command.
 `
@@ -37,6 +40,8 @@ func main() {
 		err = runImage(args)
 	case "write":
 		err = runWrite(args)
+	case "verify":
+		err = runVerify(args)
 	case "-h", "--help", "help":
 		fmt.Print(usage)
 		return

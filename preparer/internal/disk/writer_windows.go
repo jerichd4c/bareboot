@@ -136,6 +136,14 @@ func (w *Writer) Sync() error {
 	return nil
 }
 
+// DropCache exists for symmetry with Linux. Windows does not keep raw disk
+// I/O (\\.\PhysicalDriveN) in the file cache, so reads already come from the
+// device after Sync; there is nothing to discard.
+func (w *Writer) DropCache() error { return DropCache(w.file) }
+
+// DropCache does the same for any open disk device: nothing on Windows.
+func DropCache(f *os.File) error { return nil }
+
 // Close flushes, asks Windows to re-read the new partition table, closes the
 // disk and finally unlocks the volumes. The first error is returned.
 func (w *Writer) Close() error {
