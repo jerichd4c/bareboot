@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>bareboot - Guia de demostracion</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  @page { @bottom-left { content: "bareboot \2014  Guía de demostración"; font: 9pt "Segoe UI", sans-serif; color: #6b7280; } }
+  .cover { height: 236mm; }
+  .cover .screen { width: 105mm; }
+</style>
+</head>
+<body>
+
+<!-- ===================================================== COVER -->
+<section class="cover">
+  <div class="band" style="background: linear-gradient(135deg, #064e3b 0%, #047857 100%);">
+    <div class="kicker">Sistemas Operativos &middot; Universidad Rafael Urdaneta</div>
+    <div class="title">bareboot</div>
+    <div class="subtitle">Guía de demostración: requisitos y comandos para mostrar el sistema funcionando, de la compilación al arranque en el equipo real.</div>
+  </div>
+  <img class="screen" src="img/qemu-banner.png" alt="Banner de bareboot en QEMU">
+  <div class="meta">
+    <b>Autor:</b> Sebastian Cohen<br>
+    <b>Equipo de prueba:</b> Lenovo V14 G4 (firmware UEFI Phoenix), Windows 11<br>
+    <b>Memoria USB:</b> Generic Mass-Storage, 922 MiB (dedicada al proyecto)<br>
+    <b>Documento complementario:</b> bareboot &mdash; Documentación técnica
+  </div>
+</section>
+
+<!-- ===================================================== OVERVIEW -->
+<h1 class="nobreak">Resumen de la demostración</h1>
+<p>La demostración recorre el sistema en el mismo orden en que se usa. Cada paso indica el comando, la salida esperada y el requisito de la actividad que demuestra.</p>
+<table>
+  <tr><th style="width:8%">Paso</th><th style="width:42%">Qué se muestra</th><th>Requisitos</th><th style="width:12%">Duración</th></tr>
+  <tr><td>1</td><td>Compilar el programa y generar la imagen</td><td>1, 3, 4</td><td>1 min</td></tr>
+  <tr><td>2</td><td>Verificar la imagen con herramientas externas</td><td>3, Formato coherente</td><td>1 min</td></tr>
+  <tr><td>3</td><td>Arrancar la imagen en QEMU</td><td>9</td><td>1 min</td></tr>
+  <tr><td>4</td><td>Conectar la USB y detectar discos</td><td>5, Destino seguro</td><td>2 min</td></tr>
+  <tr><td>5</td><td>Errores y rechazos controlados</td><td>8, Destino seguro</td><td>2 min</td></tr>
+  <tr><td>6</td><td>Preparar la USB</td><td>4, 6, 7, Escritura completa</td><td>2 min</td></tr>
+  <tr><td>7</td><td>Verificar la USB sin escribir</td><td>7</td><td>1 min</td></tr>
+  <tr><td>8</td><td>Arranque físico desde la USB</td><td>2, 10, Compatibilidad comprobada</td><td>5 min</td></tr>
+  <tr><td>9</td><td>Restaurar la seguridad del equipo</td><td>Compatibilidad comprobada</td><td>3 min</td></tr>
+</table>
+<div class="note"><b>Dónde ejecutar cada comando</b>
+Salvo que se indique otra cosa, los comandos se ejecutan en <b>PowerShell normal</b> (sin administrador), desde la raíz del repositorio: <code>C:\Users\sebas\Desktop\repos\bareboot</code>. Los pasos que necesitan <b>PowerShell como administrador</b> están marcados.</div>
+
+<!-- ===================================================== REQUIREMENTS -->
+<h1>Requisitos</h1>
+
+<h2>Hardware</h2>
+<table class="avoid">
+  <tr><th style="width:30%">Elemento</th><th>Requisito</th></tr>
+  <tr><td>Equipo de prueba</td><td>PC x86-64 con firmware <b>UEFI</b> en el que se pueda desactivar Secure Boot. Debe ser un equipo propio: la actividad prohíbe cambiar opciones de seguridad de equipos ajenos.</td></tr>
+  <tr><td>Memoria USB</td><td>Dedicada al proyecto, de al menos 66 MiB y sectores de 512 bytes. <b>Todo su contenido se borra.</b></td></tr>
+</table>
+
+<h2>Software (instalación única)</h2>
+<table>
+  <tr><th style="width:30%">Herramienta</th><th>Instalación / comprobación</th></tr>
+  <tr><td>LLVM (clang, lld-link)</td><td><code>winget install LLVM.LLVM</code> &mdash; comprobar: <code>clang --version</code></td></tr>
+  <tr><td>Go 1.27+</td><td><code>winget install GoLang.Go</code> &mdash; comprobar: <code>go version</code></td></tr>
+  <tr><td>QEMU</td><td><code>winget install SoftwareFreedomConservancy.QEMU</code> &mdash; comprobar: <code>qemu-system-x86_64 --version</code></td></tr>
+  <tr><td>WSL 2 (Ubuntu)</td><td>Instalado y funcionando: <code>wsl -e uname -r</code></td></tr>
+  <tr><td>Verificadores en WSL</td><td><code>wsl sudo apt install -y gdisk dosfstools mtools</code></td></tr>
+  <tr><td>usbipd-win</td><td><code>winget install --interactive --exact dorssel.usbipd-win</code> &mdash; comprobar: <code>usbipd list</code></td></tr>
+</table>
+
+<h2>Configuración única de la USB en usbipd</h2>
+<p>Conectar la USB, identificar su BUSID y compartirla con WSL. Solo se hace una vez por memoria.</p>
+<p><b>PowerShell como administrador:</b></p>
+<pre><code><span class="k">usbipd</span> list                      <span class="c"># find "USB Mass Storage Device", e.g. BUSID 1-2</span>
+<span class="k">usbipd</span> bind --busid 1-2</code></pre>
+
+<h2>Lista de comprobación antes de la demostración</h2>
+<ul class="checklist">
+  <li>El repositorio compila: <code>.\scripts\build-image.ps1</code> termina sin errores.</li>
+  <li>La clave de recuperación de BitLocker está anotada (cuenta Microsoft &rarr; Dispositivos &rarr; Claves de recuperación).</li>
+  <li>Se conoce la tecla de configuración del firmware (Lenovo V14 G4: <b>F2</b>) y la del menú de arranque (<b>F12</b>, o <b>Fn + F12</b>).</li>
+  <li>La USB no contiene datos que se necesiten.</li>
+  <li>Hay una cámara o celular para fotografiar el arranque físico.</li>
+</ul>
+
+<!-- ===================================================== STEPS -->
+<h1>Demostración paso a paso</h1>
+
+<div class="step">
+  <h3>Paso 1 &mdash; Compilar el programa de arranque y generar la imagen</h3>
+  <div class="req">Requisitos 1, 3 y 4 &middot; Programa propio, construcción del medio, preparador propio</div>
+<pre><code><span class="k">.\scripts\build-image.ps1</span></code></pre>
+  <p>Salida esperada:</p>
+<pre class="out">[1/3] Building boot program...
+OK: C:\Users\sebas\Desktop\repos\bareboot\build\esp\EFI\BOOT\BOOTX64.EFI
+[2/3] Building preparer (Linux and Windows)...
+[3/3] Building disk image...
+image written: /mnt/c/Users/sebas/Desktop/repos/bareboot/build/bareboot.img (3072-byte boot program)</pre>
+  <p><b>Qué explicar:</b> <code>main.c</code> se compila con clang + lld-link como aplicación UEFI (<code>BOOTX64.EFI</code>, 3072 bytes). Luego la herramienta Go escribe, con código propio, una imagen de disco con tabla GPT, partición ESP en FAT32 y el programa en <code>\EFI\BOOT\BOOTX64.EFI</code>.</p>
+</div>
+
+<div class="step">
+  <h3>Paso 2 &mdash; Verificar la imagen con herramientas independientes</h3>
+  <div class="req">Requisito 3 &middot; Regla &ldquo;Formato coherente&rdquo;</div>
+<pre><code><span class="k">.\scripts\verify-image.ps1</span></code></pre>
+<pre class="out"><span class="g">[PASS] GPT - sgdisk -v
+[PASS] ESP type - partition 1 has the EFI System Partition GUID
+[PASS] FAT32 - fsck.vfat -n (read-only check)
+[PASS] Files - \EFI\BOOT\BOOTX64.EFI present
+[PASS] Contents - SHA-256 ...</span>
+
+Image verified.</pre>
+  <p><b>Qué explicar:</b> estas comprobaciones las hacen herramientas de Linux que no forman parte del proyecto (<code>sgdisk</code>, <code>fsck.vfat</code>, <code>mtools</code>). Si el código escribiera mal un CRC o un campo del FAT32, fallarían.</p>
+  <p>La herramienta también tiene su propia verificación:</p>
+<pre><code><span class="k">wsl</span> --cd C:\Users\sebas\Desktop\repos\bareboot\build -e ./preparer-linux verify -image bareboot.img</code></pre>
+</div>
+
+<div class="step">
+  <h3>Paso 3 &mdash; Arrancar la imagen en una máquina virtual</h3>
+  <div class="req">Requisito 9 &middot; Prueba virtual</div>
+<pre><code><span class="k">.\scripts\run-qemu.ps1</span></code></pre>
+  <p>Se abre una ventana de QEMU. Tras el logo de TianoCore aparece el banner de bareboot con <code>Firmware: EDK II</code>. Hacer clic dentro de la ventana y pulsar una tecla: el programa devuelve el control y el firmware abre su menú de configuración. Cerrar la ventana para terminar.</p>
+  <p><b>Qué explicar:</b> QEMU emula un PC con firmware UEFI (EDK II). El firmware lee la GPT de la imagen, encuentra la ESP, carga <code>BOOTX64.EFI</code> y llama a <code>efi_main</code>. El menú gris del final es la prueba de que el programa retornó correctamente al firmware.</p>
+</div>
+
+<div class="step">
+  <h3>Paso 4 &mdash; Conectar la USB y detectar los discos</h3>
+  <div class="req">Requisito 5 &middot; Identificación del destino &middot; Regla &ldquo;Destino seguro&rdquo;</div>
+  <p><b>4.1</b> Mantener WSL encendido: abrir una terminal aparte y dejarla abierta con:</p>
+<pre><code><span class="k">wsl</span> -e sleep 7200</code></pre>
+  <p><b>4.2</b> Pasar la USB a WSL (en otra terminal):</p>
+<pre><code><span class="k">usbipd</span> attach --wsl --busid 1-2
+<span class="k">usbipd</span> list                      <span class="c"># state must be "Attached"</span></code></pre>
+  <p><b>4.3</b> Listar los discos:</p>
+<pre><code><span class="k">.\scripts\preparer.ps1</span> list</code></pre>
+<pre class="out">DISK  BUS   SIZE       MODEL                 VOLUMES  STATUS
+sda   SCSI  722.9 MiB  Msft Virtual Disk     -        REJECTED: not a USB disk (bus: SCSI)
+sdd   SCSI  1.0 TiB    Msft Virtual Disk     /        REJECTED: system disk (holds the running OS);
+                                                       not a USB disk (bus: SCSI)
+<span class="g">sde   USB   922.0 MiB  Generic Mass-Storage  -        OK - can be used</span>
+
+5 disk(s) found, 1 eligible.</pre>
+  <p><b>Qué explicar:</b> la herramienta lee la información de cada disco (en Linux desde <code>/sys/block</code>; en Windows con <code>DeviceIoControl</code>) y aplica reglas de seguridad: rechaza el disco del sistema, los que no son USB, los que no reportan identidad, los demasiado pequeños y los de sector distinto de 512 bytes.</p>
+  <div class="warn"><b>El nombre puede cambiar</b>
+  <code>sde</code> depende del orden de detección. Usar siempre el nombre que muestre <code>list</code> en ese momento en los pasos siguientes.</div>
+</div>
+
+<div class="step">
+  <h3>Paso 5 &mdash; Errores y rechazos controlados</h3>
+  <div class="req">Requisito 8 &middot; Manejo de errores &middot; Regla &ldquo;Destino seguro&rdquo;</div>
+  <table class="avoid">
+    <tr><th style="width:42%">Comando</th><th>Resultado esperado</th></tr>
+    <tr><td><code>.\scripts\preparer.ps1 write -disk sdd</code><br><span class="small">intentar escribir el disco del sistema</span></td><td><code>error: disk sdd cannot be used:</code><br><code>- system disk (holds the running OS)</code><br><code>- not a USB disk (bus: SCSI)</code></td></tr>
+    <tr><td><code>.\scripts\preparer.ps1 write -disk sdz</code><br><span class="small">disco inexistente</span></td><td><code>error: disk "sdz" not found (unplugged or wrong name)</code></td></tr>
+    <tr><td><code>wsl --cd C:\Users\sebas\Desktop\repos\bareboot\build -e ./preparer-linux write -disk sde</code><br><span class="small">sin permisos de root</span></td><td><code>error: root rights required: run the command with sudo (or wsl -u root)</code></td></tr>
+    <tr><td><code>.\scripts\preparer.ps1 write -disk sde</code> y responder <code>no</code> a la confirmación</td><td><code>Cancelled. Nothing was written.</code></td></tr>
+    <tr><td><code>.\scripts\preparer.ps1 write</code></td><td><code>error: missing -disk; run "preparer list" to see the disks</code></td></tr>
+  </table>
+  <p>Otros errores que la herramienta reporta con mensajes específicos, sin declarar éxito: USB protegida contra escritura, desconexión durante la escritura, fallo de entrada/salida, capacidad insuficiente y fallo de verificación. Pulsar Ctrl+C durante la escritura detiene la operación entre dos escrituras e informa que la USB <b>no</b> quedó preparada.</p>
+</div>
+
+<div class="step">
+  <h3>Paso 6 &mdash; Preparar la USB</h3>
+  <div class="req">Requisitos 4, 6 y 7 &middot; Preparador propio, confirmación, progreso y resultado &middot; Regla &ldquo;Escritura completa&rdquo;</div>
+<pre><code><span class="k">.\scripts\preparer.ps1</span> write -disk sde</code></pre>
+  <p>La herramienta muestra el resumen del destino y lo que se escribirá, advierte que se perderá todo el contenido y pide la frase de confirmación. Escribir exactamente <code>ERASE DISK sde</code>:</p>
+<pre class="out">Target disk
+  Disk:        sde (/dev/sde)
+  Model:       Generic Mass-Storage
+  Bus:         USB
+  Capacity:    922.0 MiB (966787072 bytes, 512-byte sectors)
+WARNING: ALL DATA ON THIS DISK WILL BE LOST. ...
+
+Type "ERASE DISK sde" to continue, or anything else to cancel: ERASE DISK sde
+Releasing the volumes of disk sde (lock/unmount)...
+[1/3] Writing boot media...
+  [##############################] 100%  1.0 MiB / 1.0 MiB
+[2/3] Flushing pending writes to the device...
+[3/3] Verifying...
+<span class="g">  [OK  ] read-back: 1.0 MiB in 15 regions identical to what was written
+  [OK  ] GPT: protective MBR, primary and backup headers and entries valid (CRC32)
+  [OK  ] ESP: "EFI System Partition", LBA 2048-133119 (64.0 MiB)
+  [OK  ] FAT32: boot sector and both FATs valid, \EFI\BOOT\BOOTX64.EFI found
+  [OK  ] boot program: 3072 bytes, identical to the source file</span>
+
+Done: disk sde prepared and verified (1.0 MiB written).</pre>
+  <p><b>Qué explicar:</b> antes de escribir se vuelve a consultar el disco para comprobar que sigue siendo el mismo dispositivo. Se desmontan sus volúmenes, se escribe con barra de progreso, se sincroniza (<code>fsync</code>), se descarta la caché y se verifica dos veces: relectura byte a byte de las 15 escrituras y lectura de la GPT, la ESP y el FAT32 como lo haría el firmware.</p>
+</div>
+
+<div class="step">
+  <h3>Paso 7 &mdash; Verificar la USB sin escribir</h3>
+  <div class="req">Requisito 7 &middot; Comprobación del resultado</div>
+<pre><code><span class="k">.\scripts\preparer.ps1</span> verify -disk sde</code></pre>
+<pre class="out">Verifying disk sde (Generic Mass-Storage, 922.0 MiB)
+<span class="g">  [OK  ] GPT: protective MBR, primary and backup headers and entries valid (CRC32)
+  [OK  ] ESP: "EFI System Partition", LBA 2048-133119 (64.0 MiB)
+  [OK  ] FAT32: boot sector and both FATs valid, \EFI\BOOT\BOOTX64.EFI found
+  [OK  ] boot program: 3072 bytes, identical to the source file</span>
+
+Valid bareboot boot media.</pre>
+  <p>Opcional, verificación con herramientas externas directamente sobre la USB:</p>
+<pre><code><span class="k">wsl</span> -u root -e sh -c <span class="s">'PATH=/usr/sbin:$PATH; sgdisk -v /dev/sde; fsck.vfat -n /dev/sde1'</span></code></pre>
+</div>
+
+<div class="step">
+  <h3>Paso 8 &mdash; Arranque físico desde la USB</h3>
+  <div class="req">Requisitos 2 y 10 &middot; Tipo de arranque, arranque físico &middot; Regla &ldquo;Compatibilidad comprobada&rdquo;</div>
+  <p><b>8.1 Suspender BitLocker</b> (solo si el disco está cifrado). <b>PowerShell como administrador:</b></p>
+<pre><code><span class="k">manage-bde</span> -status C:                                  <span class="c"># "Protection On" means encrypted</span>
+<span class="k">manage-bde</span> -protectors -get C: -Type RecoveryPassword  <span class="c"># ID must match the saved key</span>
+<span class="k">manage-bde</span> -protectors -disable C: -RebootCount 0
+<span class="k">manage-bde</span> -status C:                                  <span class="c"># must say "Protection Off"</span></code></pre>
+  <p><b>8.2 Entrar al firmware y desactivar Secure Boot.</b> PowerShell como administrador:</p>
+<pre><code><span class="k">shutdown</span> /r /fw /t 0</code></pre>
+  <p>En el firmware: pestaña <b>Security</b> &rarr; <b>Secure Boot</b> &rarr; <b>Disabled</b>. Guardar y salir con <b>F10</b>.</p>
+  <p><b>8.3 Arrancar desde la USB.</b> Con la USB conectada, al encender pulsar repetidamente <b>F12</b> (o <b>Fn + F12</b>) y elegir la opción USB <b>Generic Mass-Storage</b>.</p>
+  <p><b>Resultado esperado:</b> el banner de bareboot con <code>Autor: Sebastian Cohen</code> y <code>Firmware: Phoenix Technologies Ltd.</code> Al pulsar una tecla, el firmware continúa con la siguiente opción de arranque (Windows) o vuelve a su menú.</p>
+  <figure><img src="img/arranque-real.jpg" alt="" style="width:110mm"><figcaption>Resultado del arranque físico en el Lenovo V14 G4.</figcaption></figure>
+  <p><b>Qué explicar:</b> la línea <code>Firmware</code> la responde el firmware del equipo a través de <code>SystemTable-&gt;FirmwareVendor</code>; en QEMU decía <i>EDK II</i> y aquí dice <i>Phoenix</i>, lo que prueba que el código corre sobre el hardware real. Secure Boot se desactiva porque <code>BOOTX64.EFI</code> no está firmado con una clave reconocida por el firmware.</p>
+</div>
+
+<div class="step">
+  <h3>Paso 9 &mdash; Restaurar la seguridad del equipo</h3>
+  <div class="req">Regla &ldquo;Compatibilidad comprobada&rdquo;: no dejar cambiadas las opciones de seguridad</div>
+  <p><b>9.1</b> Entrar otra vez al firmware (PowerShell como administrador: <code>shutdown /r /fw /t 0</code>) y poner <b>Secure Boot &rarr; Enabled</b>. Guardar con <b>F10</b>.</p>
+  <p><b>9.2</b> Ya en Windows, <b>PowerShell como administrador</b>:</p>
+<pre><code><span class="k">manage-bde</span> -protectors -enable C:
+<span class="k">Confirm-SecureBootUEFI</span>        <span class="c"># must return True</span>
+<span class="k">manage-bde</span> -status C:          <span class="c"># must say "Protection On"</span></code></pre>
+  <div class="warn"><b>Orden obligatorio</b>
+  Primero se activa Secure Boot y después se reactiva BitLocker. Al revés, el TPM registraría el estado sin Secure Boot y pediría la clave de recuperación en el siguiente arranque.</div>
+  <p><b>9.3</b> Devolver la USB a Windows (opcional): <code>usbipd detach --busid 1-2</code>.</p>
+</div>
+
+<!-- ===================================================== EXTRA -->
+<h1>Demostraciones adicionales</h1>
+
+<h2>Detección de corrupción</h2>
+<p>Muestra que la verificación detecta un solo byte alterado. Se trabaja sobre una copia; la imagen original no se toca.</p>
+<pre><code><span class="c"># Copy the image and change one byte inside BOOTX64.EFI</span>
+$b = <span class="s">"C:\Users\sebas\Desktop\repos\bareboot\build"</span>
+<span class="k">Copy-Item</span> <span class="s">"$b\bareboot.img"</span> <span class="s">"$b\bad.img"</span>
+$fs = [IO.File]::Open(<span class="s">"$b\bad.img"</span>, <span class="s">'Open'</span>, <span class="s">'ReadWrite'</span>)
+$fs.Position = 1048576 + (2080 + 3) * 512 + 10; $fs.WriteByte(0xAA); $fs.Close()
+<span class="k">wsl</span> --cd $b -e ./preparer-linux verify -image bad.img
+<span class="k">Remove-Item</span> <span class="s">"$b\bad.img"</span></code></pre>
+<pre class="out">  [OK  ] GPT: ...
+  [OK  ] FAT32: ...
+<span class="r">  [FAIL] BOOTX64.EFI on the media (3072 bytes) differs from the boot program (3072 bytes)</span>
+error: NOT a valid bareboot media: ...</pre>
+<p>Otros desplazamientos para probar: <code>552</code> (encabezado GPT principal, falla el CRC32), <code>1048589</code> (sectores por cluster del FAT32).</p>
+
+<h2>Compilación reproducible</h2>
+<pre><code><span class="k">.\boot\build.ps1</span>; (<span class="k">Get-FileHash</span> .\build\esp\EFI\BOOT\BOOTX64.EFI).Hash
+<span class="k">.\boot\build.ps1</span>; (<span class="k">Get-FileHash</span> .\build\esp\EFI\BOOT\BOOTX64.EFI).Hash   <span class="c"># same hash</span></code></pre>
+
+<h2>Estructura del disco con herramientas de Linux</h2>
+<pre><code><span class="k">wsl</span> -u root -e lsblk -o NAME,SIZE,FSTYPE,LABEL,PARTLABEL,PARTTYPENAME /dev/sde
+<span class="k">wsl</span> -u root -e sh -c <span class="s">'PATH=/usr/sbin:$PATH; sgdisk -p /dev/sde'</span></code></pre>
+<pre class="out">NAME    SIZE FSTYPE LABEL    PARTLABEL            PARTTYPENAME
+sde     922M
+`-sde1   64M vfat   BAREBOOT EFI System Partition EFI System</pre>
+
+<h2>Versión de Windows de la herramienta</h2>
+<p>En un equipo sin Smart App Control, la herramienta funciona directamente en Windows con la API Win32. PowerShell como administrador, desde <code>build\</code>:</p>
+<pre><code>.\preparer.exe list                 <span class="c"># the USB appears as disk 1, the system disk as 0</span>
+.\preparer.exe write -disk 1
+.\preparer.exe verify -disk 1</code></pre>
+<p>En el equipo de desarrollo este ejecutable lo bloquea Smart App Control (&ldquo;An Application Control policy has blocked this file&rdquo;), motivo por el que la escritura se hace desde WSL.</p>
+
+<!-- ===================================================== TROUBLESHOOTING -->
+<h1>Solución de problemas</h1>
+<table>
+  <tr><th style="width:34%">Síntoma</th><th>Causa probable y solución</th></tr>
+  <tr><td><code>usbipd: error: There is no WSL 2 distribution running</code></td><td>WSL está apagado. Dejar abierta una terminal con <code>wsl -e sleep 7200</code> y repetir <code>usbipd attach</code>.</td></tr>
+  <tr><td>La USB no aparece en <code>preparer list</code></td><td>No está conectada a WSL: <code>usbipd list</code> debe mostrar <i>Attached</i>. El BUSID puede cambiar si se conecta en otro puerto.</td></tr>
+  <tr><td>La USB aparece con otro nombre (<code>sdf</code>&hellip;)</td><td>Normal: usar el nombre que muestre <code>list</code>.</td></tr>
+  <tr><td><code>verify</code> falla solo en <code>boot program ... differs</code></td><td>La USB tiene una versión anterior del programa. Volver a grabarla con <code>write</code>.</td></tr>
+  <tr><td><code>build-image.ps1</code> falla en el paso 3</td><td>WSL no responde o falta <code>build\preparer-linux</code>. Comprobar <code>wsl -e echo ok</code>.</td></tr>
+  <tr><td>PowerShell no permite ejecutar los scripts</td><td><code>Set-ExecutionPolicy -Scope CurrentUser RemoteSigned</code></td></tr>
+  <tr><td><code>manage-bde</code>: &ldquo;access was denied&rdquo;</td><td>La terminal no es de administrador.</td></tr>
+  <tr><td>La USB no aparece en el menú F12</td><td>Habilitar el arranque por USB en el firmware; probar otro puerto.</td></tr>
+  <tr><td>Se elige la USB pero vuelve al menú sin mostrar nada</td><td>Secure Boot sigue activo.</td></tr>
+  <tr><td>Windows pide la clave de recuperación de BitLocker</td><td>Se cambió Secure Boot sin suspender la protección. Introducir la clave de 48 dígitos; Windows arranca normalmente.</td></tr>
+  <tr><td>El firmware no muestra el banner y entra a Windows</td><td>La USB no se eligió en el menú de arranque o no contiene un medio válido (comprobar con <code>verify</code>).</td></tr>
+</table>
+
+<!-- ===================================================== QUICK REFERENCE -->
+<h1>Referencia rápida</h1>
+<table>
+  <tr><th style="width:48%">Comando</th><th>Para qué</th></tr>
+  <tr><td><code>.\scripts\build-image.ps1</code></td><td>Compilar todo y generar <code>build\bareboot.img</code></td></tr>
+  <tr><td><code>.\scripts\verify-image.ps1</code></td><td>Verificar la imagen con herramientas externas</td></tr>
+  <tr><td><code>.\scripts\run-qemu.ps1</code></td><td>Arrancar la imagen en QEMU</td></tr>
+  <tr><td><code>usbipd attach --wsl --busid 1-2</code></td><td>Conectar la USB a WSL (WSL encendido)</td></tr>
+  <tr><td><code>usbipd detach --busid 1-2</code></td><td>Devolver la USB a Windows</td></tr>
+  <tr><td><code>.\scripts\preparer.ps1 list</code></td><td>Listar discos y su elegibilidad</td></tr>
+  <tr><td><code>.\scripts\preparer.ps1 write -disk sde</code></td><td>Preparar y verificar la USB</td></tr>
+  <tr><td><code>.\scripts\preparer.ps1 verify -disk sde</code></td><td>Verificar la USB sin escribir</td></tr>
+  <tr><td><code>manage-bde -protectors -disable C: -RebootCount 0</code> (admin)</td><td>Suspender BitLocker</td></tr>
+  <tr><td><code>shutdown /r /fw /t 0</code> (admin)</td><td>Reiniciar directamente al firmware</td></tr>
+  <tr><td><code>manage-bde -protectors -enable C:</code> (admin)</td><td>Reactivar BitLocker</td></tr>
+  <tr><td><code>Confirm-SecureBootUEFI</code> (admin)</td><td>Comprobar Secure Boot (<code>True</code>)</td></tr>
+</table>
+
+<h2>Requisitos y dónde se demuestran</h2>
+<table class="avoid">
+  <tr><th style="width:46%">Requisito de la actividad</th><th>Paso</th></tr>
+  <tr><td>1. Programa de arranque propio</td><td>1, 3, 8</td></tr>
+  <tr><td>2. Tipo de arranque (UEFI)</td><td>3, 8</td></tr>
+  <tr><td>3. Construcción del medio</td><td>1, 2</td></tr>
+  <tr><td>4. Preparador propio</td><td>1, 6</td></tr>
+  <tr><td>5. Identificación del destino</td><td>4, 6</td></tr>
+  <tr><td>6. Confirmación de sobrescritura</td><td>5, 6</td></tr>
+  <tr><td>7. Progreso y resultado</td><td>6, 7</td></tr>
+  <tr><td>8. Manejo de errores</td><td>5, adicionales</td></tr>
+  <tr><td>9. Prueba virtual</td><td>3</td></tr>
+  <tr><td>10. Arranque físico</td><td>8</td></tr>
+</table>
+
+</body>
+</html>

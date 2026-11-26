@@ -1,0 +1,679 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>bareboot - Documentacion tecnica</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  @page { @bottom-left { content: "bareboot \2014  Documentación técnica"; font: 9pt "Segoe UI", sans-serif; color: #6b7280; } }
+</style>
+</head>
+<body>
+
+<!-- ===================================================== COVER -->
+<section class="cover">
+  <div class="band">
+    <div class="kicker">Sistemas Operativos &middot; Universidad Rafael Urdaneta</div>
+    <div class="title">bareboot</div>
+    <div class="subtitle">USB booteable con programa de arranque propio: documentación técnica completa del sistema, de los conceptos básicos a la implementación.</div>
+  </div>
+  <img class="screen" src="img/arranque-real.jpg" alt="Banner de bareboot en el equipo real">
+  <div class="meta">
+    <b>Autor:</b> Sebastian Cohen<br>
+    <b>Asignatura:</b> Sistemas Operativos &mdash; Actividad &ldquo;USB booteable con programa propio&rdquo;<br>
+    <b>Lenguajes:</b> C (programa de arranque UEFI) y Go (herramienta preparadora)<br>
+    <b>Fecha:</b> noviembre de 2026
+  </div>
+</section>
+
+<!-- ===================================================== TOC -->
+<section class="toc">
+  <h1 class="nobreak">Contenido</h1>
+  <ol>
+    <li>1. Introducción
+      <ol><li>1.1 Qué hace el sistema</li><li>1.2 Las dos partes</li><li>1.3 Resultado final</li><li>1.4 Cómo leer este documento</li></ol></li>
+    <li>2. Conceptos básicos
+      <ol><li>2.1 Qué ocurre al encender un computador</li><li>2.2 BIOS frente a UEFI</li><li>2.3 El disco como arreglo de sectores</li><li>2.4 Tablas de particiones: MBR y GPT</li><li>2.5 Sistemas de archivos y FAT32</li><li>2.6 La partición de sistema EFI (ESP)</li><li>2.7 Aplicaciones UEFI</li><li>2.8 Llamadas al sistema frente a servicios de firmware</li><li>2.9 Secure Boot, TPM y BitLocker</li><li>2.10 Integridad: CRC32, SHA-256 y compilaciones reproducibles</li></ol></li>
+    <li>3. Arquitectura del sistema
+      <ol><li>3.1 Vista general</li><li>3.2 Estructura del repositorio</li><li>3.3 Flujo de construcción</li><li>3.4 Diseño en capas de la herramienta</li><li>3.5 La interfaz io.WriterAt</li></ol></li>
+    <li>4. El programa de arranque (C / UEFI)</li>
+    <li>5. La herramienta preparadora (Go)
+      <ol><li>5.1 Interfaz de línea de comandos</li><li>5.2 Paquete gpt</li><li>5.3 Paquete fat32</li><li>5.4 Composición del medio: writeMedia</li><li>5.5 Paquete disk: detección y reglas de seguridad</li><li>5.6 Escritura en el dispositivo</li><li>5.7 El comando write paso a paso</li><li>5.8 Verificación</li></ol></li>
+    <li>6. Entorno, scripts y pruebas virtuales</li>
+    <li>7. Desarrollo paso a paso</li>
+    <li>8. Pruebas y evidencia</li>
+    <li>9. Correspondencia con los requisitos de la actividad</li>
+    <li>10. Problemas encontrados y soluciones</li>
+    <li>11. Glosario</li>
+    <li>12. Referencias</li>
+  </ol>
+</section>
+
+<!-- ===================================================== 1 -->
+<h1>1. Introducción</h1>
+
+<h2>1.1 Qué hace el sistema</h2>
+<p><b>bareboot</b> convierte una memoria USB en un medio de arranque que ejecuta un <b>programa escrito por el autor</b>, sin cargar ningún sistema operativo. Al seleccionar la USB en el menú de arranque de un equipo con firmware UEFI, la pantalla muestra un banner con el nombre del proyecto, el autor y el fabricante del firmware que lo está ejecutando; al pulsar una tecla, el programa devuelve el control al firmware y el equipo continúa con su arranque normal.</p>
+<p>Lo importante no es el mensaje en sí, sino que <b>toda la cadena</b> que lo hace posible fue construida por el proyecto: el programa que corre sin sistema operativo, la tabla de particiones del disco, el sistema de archivos, la copia del programa, la escritura en la USB y la verificación del resultado. No se usa ningún grabador externo (Rufus, Etcher, <code>dd</code>) ni el formateador del sistema operativo.</p>
+
+<h2>1.2 Las dos partes</h2>
+<div class="two">
+  <div class="note"><b>Programa de arranque (carpeta <code>boot/</code>)</b>
+    Escrito en C, compilado como <b>aplicación UEFI</b> (<code>BOOTX64.EFI</code>). Se ejecuta cuando todavía no hay sistema operativo: para escribir en pantalla o leer el teclado usa los <b>servicios del firmware UEFI</b>.</div>
+  <div class="tip"><b>Herramienta preparadora (carpeta <code>preparer/</code>)</b>
+    Escrita en Go. Se ejecuta sobre un sistema operativo (Windows o Linux) y usa sus <b>llamadas al sistema</b> para detectar la USB, comprobar que es segura, escribirle la tabla GPT, el sistema de archivos FAT32 y el programa, y verificar lo escrito.</div>
+</div>
+<p>Las dos partes nunca se ejecutan al mismo tiempo: la herramienta corre <em>antes</em>, con el sistema operativo encendido; el programa de arranque corre <em>después</em>, cuando ese sistema operativo ya no está.</p>
+
+<h2>1.3 Resultado final</h2>
+<div class="two">
+  <figure><img src="img/qemu-banner.png" alt="Banner en QEMU"><figcaption>Figura 1. El programa en la máquina virtual QEMU (firmware EDK II).</figcaption></figure>
+  <figure><img src="img/arranque-real.jpg" alt="Banner en el equipo real"><figcaption>Figura 2. El mismo programa arrancado desde la USB en el equipo real, un Lenovo V14 G4 con firmware Phoenix.</figcaption></figure>
+</div>
+<p>La línea <code>Firmware:</code> la obtiene el propio programa preguntándole al firmware quién es. En la máquina virtual responde <i>EDK II</i>; en el equipo físico responde <i>Phoenix Technologies Ltd.</i>, lo que prueba que el código se ejecutó directamente sobre el hardware real.</p>
+
+<h2>1.4 Cómo leer este documento</h2>
+<ul>
+  <li>El <b>capítulo 2</b> explica desde cero los conceptos necesarios: arranque, firmware, discos, particiones, sistemas de archivos y seguridad. Quien ya los domine puede pasar al capítulo 3.</li>
+  <li>Los <b>capítulos 3 a 6</b> describen la arquitectura y cada componente del código, explicando <em>qué</em> hace y <em>por qué</em> se diseñó así.</li>
+  <li>Los <b>capítulos 7 a 10</b> cuentan cómo se construyó, cómo se probó, cómo se cumple cada requisito y qué problemas aparecieron.</li>
+  <li>Los pasos concretos para demostrar el sistema están en un documento aparte: <b>Guía de demostración</b>.</li>
+</ul>
+
+<!-- ===================================================== 2 -->
+<h1>2. Conceptos básicos</h1>
+
+<h2>2.1 Qué ocurre al encender un computador</h2>
+<p>Cuando se pulsa el botón de encendido, la CPU no sabe nada de discos ni de sistemas operativos. Empieza a ejecutar instrucciones desde una dirección fija que apunta a un chip de memoria no volátil en la placa base: el <b>firmware</b>. El firmware es el primer software que corre y tiene tres tareas principales:</p>
+<ol>
+  <li><b>Inicializar el hardware</b>: memoria RAM, controladores de disco, USB, teclado, pantalla (fase conocida como POST, <i>Power-On Self-Test</i>).</li>
+  <li><b>Elegir desde dónde arrancar</b>: recorre una lista de opciones de arranque (disco interno, USB, red) en un orden configurable.</li>
+  <li><b>Cargar y ejecutar el siguiente programa</b>: normalmente el cargador del sistema operativo (por ejemplo el Windows Boot Manager). En este proyecto, ese siguiente programa es <b>bareboot</b>.</li>
+</ol>
+<div class="diagram flow">
+  <div class="box gray"><b>Encendido</b>CPU salta al firmware</div><div class="arrow">&rarr;</div>
+  <div class="box"><b>Firmware</b>inicializa hardware</div><div class="arrow">&rarr;</div>
+  <div class="box"><b>Boot manager</b>elige dispositivo</div><div class="arrow">&rarr;</div>
+  <div class="box alt"><b>Programa de arranque</b>Windows&hellip; o bareboot</div>
+</div>
+
+<h2>2.2 BIOS frente a UEFI</h2>
+<p>Existen dos generaciones de firmware en los PC x86:</p>
+<table>
+  <tr><th></th><th>BIOS (heredado / Legacy)</th><th>UEFI</th></tr>
+  <tr><td>Origen</td><td>IBM PC, 1981</td><td>Especificación moderna (UEFI Forum), estándar desde ~2010</td></tr>
+  <tr><td>Qué carga</td><td>Los primeros 512 bytes del disco (sector MBR), en modo real de 16 bits</td><td>Un archivo ejecutable (formato PE32+) desde una partición FAT, en 64 bits</td></tr>
+  <tr><td>Servicios</td><td>Interrupciones de software (<code>int 0x10</code> para video, <code>int 0x13</code> para disco)</td><td>Tablas de funciones en C (<i>System Table</i>, <i>Boot Services</i>, protocolos)</td></tr>
+  <tr><td>Particiones</td><td>MBR (máximo 2 TiB, 4 particiones primarias)</td><td>GPT (hasta 128 particiones, discos enormes); también lee MBR</td></tr>
+  <tr><td>Seguridad</td><td>Ninguna</td><td>Secure Boot (verificación de firmas)</td></tr>
+</table>
+<div class="key"><b>Decisión del proyecto: UEFI</b>
+El equipo de prueba (Lenovo V14 G4) tiene firmware <b>solo UEFI</b>: no ofrece el modo de compatibilidad CSM/Legacy. Por eso el programa es una aplicación UEFI y el medio usa GPT + FAT32. Esta ruta es además la que funciona en cualquier PC moderno.</div>
+
+<h2>2.3 El disco como arreglo de sectores</h2>
+<p>Para el sistema operativo y para el firmware, un disco (o una memoria USB) es simplemente un <b>arreglo enorme de bytes</b> dividido en bloques de tamaño fijo llamados <b>sectores</b>; en este proyecto cada sector mide <b>512 bytes</b>. Cada sector se identifica por su número, el <b>LBA</b> (<i>Logical Block Address</i>): el LBA 0 son los bytes 0&ndash;511, el LBA 1 los bytes 512&ndash;1023, y así sucesivamente. La posición en bytes de un sector es <code>LBA &times; 512</code>.</p>
+<p>La memoria USB de prueba tiene 966&nbsp;787&nbsp;072 bytes, es decir 1&nbsp;888&nbsp;256 sectores (LBA 0 a 1&nbsp;888&nbsp;255). Todo lo que hace la herramienta consiste en escribir bytes concretos en posiciones concretas de ese arreglo.</p>
+<h3>Little-endian</h3>
+<p>Los números de más de un byte (por ejemplo un LBA de 64 bits) se guardan en orden <b>little-endian</b>: el byte menos significativo primero. El número <code>2048</code> (<code>0x00000800</code>) se guarda como los bytes <code>00 08 00 00</code>. Todas las estructuras de este proyecto (GPT, FAT32, estructuras de Windows) usan este orden, y en Go se manejan con <code>encoding/binary.LittleEndian</code>.</p>
+
+<h2>2.4 Tablas de particiones: MBR y GPT</h2>
+<p>Una <b>tabla de particiones</b> divide el disco en zonas independientes (particiones) y dice dónde empieza y termina cada una y de qué tipo es. Sin ella, el firmware no sabe dónde buscar.</p>
+<h3>MBR (Master Boot Record)</h3>
+<p>Ocupa el LBA 0: 446 bytes de código de arranque BIOS, cuatro entradas de partición de 16 bytes y la firma <code>55 AA</code> al final. Sus campos son de 32 bits, por lo que no direcciona más de 2 TiB.</p>
+<h3>GPT (GUID Partition Table)</h3>
+<p>Es la tabla definida por la especificación UEFI y la que usa este proyecto. Su organización en un disco es:</p>
+<div class="diagram">
+  <div class="disk">
+    <div class="r-mbr" style="flex:1.1">MBR<br>protector<span class="lba">LBA 0</span></div>
+    <div class="r-gpt" style="flex:1.1">Encabezado<br>GPT<span class="lba">LBA 1</span></div>
+    <div class="r-ent" style="flex:1.6">Entradas<br>(128 &times; 128 B)<span class="lba">LBA 2&ndash;33</span></div>
+    <div class="r-free" style="flex:1">libre<span class="lba">34&ndash;2047</span></div>
+    <div class="r-esp" style="flex:4">Particiones<span class="lba">desde LBA 2048</span></div>
+    <div class="r-free" style="flex:1.2">libre</div>
+    <div class="r-ent" style="flex:1.6">Copia de<br>entradas<span class="lba">final &minus; 32</span></div>
+    <div class="r-gpt" style="flex:1.1">Copia del<br>encabezado<span class="lba">último LBA</span></div>
+  </div>
+</div>
+<ul>
+  <li><b>MBR protector</b> (LBA 0): un MBR falso con una única partición de tipo <code>0xEE</code> que cubre todo el disco. Sirve para que las herramientas antiguas, que solo entienden MBR, vean el disco como ocupado y no lo sobrescriban.</li>
+  <li><b>Encabezado</b> (LBA 1): firma <code>"EFI PART"</code>, su propia posición, la posición de la copia, la zona usable, el GUID del disco, dónde están las entradas y dos <b>CRC32</b> (uno del encabezado y otro de las entradas).</li>
+  <li><b>Entradas</b> (LBA 2&ndash;33): 128 entradas de 128 bytes. Cada una guarda el <b>GUID de tipo</b>, un GUID único, el primer y último LBA y un nombre en UTF-16.</li>
+  <li><b>Copia de respaldo</b> al final del disco: si el principio del disco se daña, la tabla puede recuperarse.</li>
+</ul>
+<p>Un <b>GUID</b> es un identificador de 128 bits. El tipo de partición que nos interesa, la partición de sistema EFI, tiene el GUID <code>C12A7328-F81F-11D2-BA4B-00A0C93EC93B</code>. En disco los tres primeros campos del GUID se guardan en little-endian y los dos últimos tal cual (formato <i>mixed-endian</i>).</p>
+
+<h2>2.5 Sistemas de archivos y FAT32</h2>
+<p>Una partición es solo un rango de sectores. Un <b>sistema de archivos</b> organiza esos sectores para guardar archivos con nombre dentro de carpetas. UEFI exige que pueda leer <b>FAT</b> (FAT12/16/32); este proyecto usa <b>FAT32</b>. Su organización es:</p>
+<div class="diagram">
+  <div class="disk">
+    <div class="r-gpt" style="flex:1.4">Sector de<br>arranque (BPB)<span class="lba">sector 0</span></div>
+    <div class="r-ent" style="flex:1">FSInfo<span class="lba">1</span></div>
+    <div class="r-gpt" style="flex:1.2">Respaldos<span class="lba">6&ndash;7</span></div>
+    <div class="r-fat" style="flex:2.2">FAT #1<span class="lba">32&ndash;1055</span></div>
+    <div class="r-fat" style="flex:2.2">FAT #2<span class="lba">1056&ndash;2079</span></div>
+    <div class="r-data" style="flex:5">Área de datos (clusters)<span class="lba">desde 2080 = cluster 2</span></div>
+  </div>
+  <p class="small center">Sectores relativos al inicio de la partición, para la ESP de 64 MiB de bareboot.</p>
+</div>
+<ul>
+  <li><b>Cluster</b>: unidad mínima de espacio para los datos. En bareboot un cluster = 1 sector = 512 bytes. Los clusters se numeran desde 2.</li>
+  <li><b>BPB</b> (<i>BIOS Parameter Block</i>): está en el sector 0 de la partición y describe todo lo demás: bytes por sector, sectores por cluster, sectores reservados, número y tamaño de las FAT, cluster de la carpeta raíz. Termina con la firma <code>55 AA</code>.</li>
+  <li><b>FAT</b> (<i>File Allocation Table</i>): un arreglo con una entrada de 4 bytes por cluster. Cada entrada dice cuál es el <b>siguiente</b> cluster del archivo, o <code>0x0FFFFFFF</code> si es el último. Un archivo es una <b>cadena</b> de clusters. Se guardan dos copias idénticas por redundancia.</li>
+  <li><b>Directorios</b>: una carpeta es un archivo especial cuyo contenido son entradas de 32 bytes: nombre en formato <b>8.3</b> (<code>"BOOTX64 EFI"</code>), atributos, fechas, primer cluster y tamaño. Toda subcarpeta empieza con las entradas <code>.</code> (ella misma) y <code>..</code> (su padre).</li>
+  <li><b>FSInfo</b>: una pista para el sistema operativo con la cantidad de clusters libres.</li>
+</ul>
+<div class="note"><b>Por qué FAT32 y no otro</b>
+Por definición, un volumen con menos de 65&nbsp;525 clusters es FAT12 o FAT16, no FAT32. Con clusters de 512 bytes eso exige al menos ~33 MiB; bareboot usa una partición de <b>64 MiB</b> para tener margen. FAT32 es además el formato que todo firmware UEFI garantiza poder leer.</div>
+
+<h2>2.6 La partición de sistema EFI (ESP)</h2>
+<p>La <b>ESP</b> (<i>EFI System Partition</i>) es una partición con el GUID de tipo de la sección 2.4 y formateada en FAT. Es donde el firmware busca programas de arranque. En un medio extraíble, todo firmware UEFI x86-64 busca un archivo en la ruta por defecto:</p>
+<pre class="light"><code>\EFI\BOOT\BOOTX64.EFI</code></pre>
+<p>Por eso la USB no necesita ninguna configuración en el equipo: basta con que tenga una tabla GPT, una ESP en FAT32 y ese archivo. El firmware los encuentra solo y el usuario elige la USB en el menú de arranque.</p>
+
+<h2>2.7 Aplicaciones UEFI</h2>
+<p>Un programa que ejecuta el firmware UEFI es una <b>aplicación UEFI</b>:</p>
+<ul>
+  <li>Su formato es <b>PE32+</b>, el mismo de los <code>.exe</code> de Windows de 64 bits, pero con el campo <i>Subsystem</i> = 10 (<code>EFI_APPLICATION</code>).</li>
+  <li>El firmware lo carga en memoria y llama a su punto de entrada con dos argumentos: un <code>EFI_HANDLE</code> que identifica la imagen y un puntero a la <b>EFI_SYSTEM_TABLE</b>.</li>
+  <li>La <b>System Table</b> es la puerta a todos los servicios: <code>ConOut</code> (pantalla), <code>ConIn</code> (teclado), <code>BootServices</code> (memoria, eventos, temporizadores, carga de imágenes) y <code>RuntimeServices</code> (reloj, variables, reinicio).</li>
+  <li>Los servicios son <b>punteros a funciones</b> dentro de estructuras C. Para usarlos, el programa debe declarar esas estructuras con los campos exactamente en el orden de la especificación.</li>
+  <li>UEFI usa la <b>convención de llamada de Microsoft x64</b> (<code>ms_abi</code>) y cadenas de texto en <b>UTF-16</b>.</li>
+  <li>No hay sistema operativo ni biblioteca estándar: no existe <code>printf</code>, <code>malloc</code> ni archivos. Todo se pide al firmware.</li>
+</ul>
+
+<h2>2.8 Llamadas al sistema frente a servicios de firmware</h2>
+<p>Esta distinción es central en la actividad. Las dos partes del proyecto le piden cosas a una capa inferior, pero esa capa es distinta:</p>
+<table>
+  <tr><th></th><th>Herramienta preparadora</th><th>Programa de arranque</th></tr>
+  <tr><td>Cuándo corre</td><td>Con un sistema operativo en ejecución</td><td>Sin sistema operativo</td></tr>
+  <tr><td>A quién pide</td><td>Al <b>núcleo del sistema operativo</b></td><td>Al <b>firmware UEFI</b></td></tr>
+  <tr><td>Mecanismo</td><td>Llamadas al sistema (<i>syscalls</i>) y API del SO</td><td>Funciones de la System Table</td></tr>
+  <tr><td>Ejemplos en Windows</td><td><code>CreateFile</code>, <code>DeviceIoControl</code>, <code>FlushFileBuffers</code>, <code>GetLogicalDrives</code></td><td rowspan="2"><code>ConOut-&gt;OutputString</code>, <code>ConOut-&gt;SetAttribute</code>, <code>ConIn-&gt;ReadKeyStroke</code>, <code>BootServices-&gt;WaitForEvent</code>, <code>BootServices-&gt;SetWatchdogTimer</code></td></tr>
+  <tr><td>Ejemplos en Linux</td><td><code>open</code>, <code>pread</code>/<code>pwrite</code>, <code>fsync</code>, <code>ioctl(BLKRRPART)</code>, <code>umount2</code></td></tr>
+  <tr><td>Protección</td><td>El SO exige permisos de administrador / root para abrir un disco crudo</td><td>No hay protección de memoria ni usuarios: el programa tiene control total de la máquina</td></tr>
+</table>
+
+<h2>2.9 Secure Boot, TPM y BitLocker</h2>
+<h3>Secure Boot</h3>
+<p>Es una función de UEFI que solo ejecuta programas de arranque <b>firmados digitalmente</b> con claves que el firmware tiene registradas (las de Microsoft y algunos fabricantes). Protege contra malware que se instala antes que el sistema operativo (<i>bootkits</i>). <code>BOOTX64.EFI</code> de bareboot no está firmado, así que con Secure Boot activo el firmware se niega a ejecutarlo. Para la prueba física se desactivó temporalmente <b>en el equipo propio</b> y se volvió a activar al terminar; la actividad prohíbe cambiar esta opción en equipos ajenos.</p>
+<h3>TPM y BitLocker</h3>
+<p>El disco del equipo de prueba está cifrado con <b>BitLocker</b>. La clave de cifrado la guarda el <b>TPM</b> (un chip de seguridad), que solo la entrega si el arranque es idéntico al de siempre, incluido el estado de Secure Boot. Cambiar Secure Boot sin precaución hace que Windows pida la clave de recuperación de 48 dígitos. Por eso, antes de la prueba se <b>suspendió</b> la protección de BitLocker (el disco sigue cifrado) y se reactivó después de volver a encender Secure Boot.</p>
+
+<h2>2.10 Integridad: CRC32, SHA-256 y compilaciones reproducibles</h2>
+<ul>
+  <li><b>CRC32</b>: un número de control de 32 bits calculado sobre un bloque de datos. GPT guarda el CRC32 de su encabezado y de sus entradas; si un solo bit cambia, el CRC no coincide y el firmware descarta la tabla.</li>
+  <li><b>SHA-256</b>: una función de hash criptográfica de 256 bits. Se usa en las pruebas para comprobar que el <code>BOOTX64.EFI</code> grabado es idéntico al compilado.</li>
+  <li><b>Compilación reproducible</b>: compilar dos veces el mismo código produce exactamente el mismo binario. Sin ella, el enlazador escribe la fecha y hora en el ejecutable y cada compilación da un archivo distinto, lo que impediría comparar la USB con el programa fuente (sección 10).</li>
+</ul>
+
+<!-- ===================================================== 3 -->
+<h1>3. Arquitectura del sistema</h1>
+
+<h2>3.1 Vista general</h2>
+<div class="diagram">
+  <div class="two">
+    <div class="layers">
+      <div style="background:#0b1f4d;color:#fff"><b style="color:#fff">EQUIPO DE DESARROLLO</b> &mdash; con sistema operativo</div>
+      <div><b>boot/main.c + efi.h</b> &rarr; clang + lld-link &rarr; <code>BOOTX64.EFI</code></div>
+      <div><b>preparer</b> (Go): <code>list</code>, <code>image</code>, <code>write</code>, <code>verify</code></div>
+      <div><b>internal/gpt, internal/fat32</b>: construyen y verifican las estructuras</div>
+      <div><b>internal/disk</b>: detecta discos y escribe en ellos mediante syscalls</div>
+      <div style="background:#eff6ff">Núcleo del SO: Windows (Win32) o Linux (WSL 2)</div>
+      <div style="background:#e5e7eb">Memoria USB &rarr; GPT + ESP (FAT32) + <code>\EFI\BOOT\BOOTX64.EFI</code></div>
+    </div>
+    <div class="layers">
+      <div style="background:#047857;color:#fff"><b style="color:#fff">EQUIPO DE ARRANQUE</b> &mdash; sin sistema operativo</div>
+      <div>Firmware UEFI (Phoenix / EDK II)</div>
+      <div>Boot manager: lee la GPT de la USB y encuentra la ESP</div>
+      <div>Driver FAT del firmware: abre <code>\EFI\BOOT\BOOTX64.EFI</code></div>
+      <div>Cargador PE: copia el programa a memoria y llama a <code>efi_main</code></div>
+      <div style="background:#f0fdf4"><b>bareboot</b>: banner, espera una tecla, retorna</div>
+      <div style="background:#e5e7eb">El firmware continúa con la siguiente opción de arranque</div>
+    </div>
+  </div>
+</div>
+
+<h2>3.2 Estructura del repositorio</h2>
+<div class="tree">bareboot/
+├── boot/                         <span class="d">programa de arranque (C, UEFI)</span>
+│   ├── efi.h                     <span class="d">definiciones mínimas de la especificación UEFI</span>
+│   ├── main.c                    <span class="d">efi_main: banner, watchdog, teclado, retorno</span>
+│   └── build.ps1                 <span class="d">compila con clang + lld-link -&gt; BOOTX64.EFI</span>
+├── preparer/                     <span class="d">herramienta preparadora (Go)</span>
+│   ├── main.go                   <span class="d">despacha los subcomandos</span>
+│   ├── cmd_list.go               <span class="d">preparer list</span>
+│   ├── cmd_image.go              <span class="d">preparer image</span>
+│   ├── cmd_write.go              <span class="d">preparer write (confirmación, escritura, verificación)</span>
+│   ├── cmd_verify.go             <span class="d">preparer verify</span>
+│   ├── media.go                  <span class="d">writeMedia: GPT + FAT32 + BOOTX64.EFI</span>
+│   ├── verify.go                 <span class="d">relectura byte a byte y verificación estructural</span>
+│   ├── progress.go               <span class="d">barra de progreso, cancelación, conteo en seco</span>
+│   ├── paths.go                  <span class="d">rutas por defecto relativas al ejecutable</span>
+│   └── internal/
+│       ├── gpt/                  <span class="d">guid.go, gpt.go (escritura), read.go (lectura)</span>
+│       ├── fat32/                <span class="d">fat32.go, dir.go (escritura), read.go (lectura)</span>
+│       └── disk/                 <span class="d">disk.go (reglas) + backends _windows.go / _linux.go</span>
+├── scripts/
+│   ├── build-image.ps1           <span class="d">compila todo y genera build\bareboot.img</span>
+│   ├── verify-image.ps1          <span class="d">verificación externa con sgdisk, fsck.vfat, mtools</span>
+│   ├── run-qemu.ps1              <span class="d">arranca una imagen en QEMU con firmware UEFI</span>
+│   └── preparer.ps1              <span class="d">ejecuta la versión Linux de la herramienta en WSL como root</span>
+├── build/                        <span class="d">salidas generadas (ignorado por git)</span>
+└── docs/                         <span class="d">esta documentación</span></div>
+
+<h2>3.3 Flujo de construcción</h2>
+<div class="diagram vflow">
+  <div class="box"><b>main.c + efi.h</b>código fuente C</div><div class="arrow">&darr; clang -target x86_64-unknown-windows -ffreestanding</div>
+  <div class="box gray"><b>main.o</b>código objeto COFF</div><div class="arrow">&darr; lld-link -subsystem:efi_application /Brepro</div>
+  <div class="box"><b>build/esp/EFI/BOOT/BOOTX64.EFI</b>aplicación UEFI PE32+ (3072 bytes)</div><div class="arrow">&darr; preparer image &nbsp;|&nbsp; preparer write -disk sde</div>
+  <div class="box alt"><b>build/bareboot.img &nbsp;o&nbsp; la memoria USB</b>GPT + ESP FAT32 + BOOTX64.EFI</div><div class="arrow">&darr; QEMU + OVMF &nbsp;|&nbsp; equipo real</div>
+  <div class="box warm"><b>Banner en pantalla</b>firmware &rarr; efi_main</div>
+</div>
+
+<h2>3.4 Diseño en capas de la herramienta</h2>
+<p>La herramienta está organizada en capas con dependencias en una sola dirección. Las capas de arriba no conocen los detalles de las de abajo:</p>
+<div class="diagram layers">
+  <div><b>CLI</b> &mdash; <code>main.go</code>, <code>cmd_*.go</code>: interacción con el usuario, confirmación, mensajes.</div>
+  <div><b>Composición</b> &mdash; <code>media.go</code>, <code>verify.go</code>, <code>progress.go</code>: qué se escribe y cómo se comprueba.</div>
+  <div><b>Formatos</b> &mdash; <code>internal/gpt</code>, <code>internal/fat32</code>: lógica pura, sin sistema operativo, portable y verificable con archivos de imagen.</div>
+  <div><b>Dispositivos</b> &mdash; <code>internal/disk</code>: reglas de seguridad portables (<code>disk.go</code>) y acceso al hardware específico de cada SO (<code>*_windows.go</code>, <code>*_linux.go</code>).</div>
+</div>
+<p>Gracias a esta separación, los paquetes de formatos se probaron completamente con imágenes de disco antes de tocar una USB real, y el soporte para Linux se agregó escribiendo solo dos archivos nuevos, sin cambiar las reglas, la GPT, el FAT32 ni la CLI.</p>
+
+<h2>3.5 La interfaz io.WriterAt</h2>
+<p>La pieza que une todo es la interfaz estándar de Go <code>io.WriterAt</code>: &ldquo;algo en lo que puedo escribir bytes en una posición&rdquo;. Los paquetes <code>gpt</code> y <code>fat32</code> escriben a través de ella sin saber qué hay detrás. Al escribir la USB se forma una cadena en la que cada eslabón hace una sola cosa:</p>
+<div class="diagram flow">
+  <div class="box"><b>writeMedia</b>genera GPT y FAT32</div><div class="arrow">&rarr;</div>
+  <div class="box gray"><b>progressWriter</b>barra + Ctrl+C</div><div class="arrow">&rarr;</div>
+  <div class="box gray"><b>recordingWriter</b>copia de cada escritura</div><div class="arrow">&rarr;</div>
+  <div class="box"><b>disk.Writer</b>syscalls del SO</div><div class="arrow">&rarr;</div>
+  <div class="box alt"><b>USB</b>/dev/sde o PhysicalDrive1</div>
+</div>
+<p>Para generar una imagen, el último eslabón es un simple archivo (<code>*os.File</code>). Para medir cuánto se va a escribir, es un <code>countingWriter</code> que solo suma tamaños. Para escribir la partición en su posición, <code>io.NewOffsetWriter</code> suma 1 MiB a cada escritura.</p>
+
+<!-- ===================================================== 4 -->
+<h1>4. El programa de arranque (C / UEFI)</h1>
+
+<h2>4.1 efi.h: el contrato con el firmware</h2>
+<p>En lugar de usar bibliotecas como gnu-efi, el proyecto declara a mano solo lo que necesita de la especificación UEFI. Esto hace visible exactamente qué servicios del firmware se usan. Contiene:</p>
+<ul>
+  <li><b>Tipos básicos</b>: <code>UINT8</code> &hellip; <code>UINT64</code>, <code>UINTN</code> (64 bits en x86-64), <code>CHAR16</code> (UTF-16), <code>EFI_HANDLE</code>, <code>EFI_EVENT</code>, <code>EFI_STATUS</code>.</li>
+  <li><b><code>EFIAPI</code></b> = <code>__attribute__((ms_abi))</code>: obliga al compilador a llamar a las funciones del firmware con la convención de Microsoft x64 (argumentos en RCX, RDX, R8, R9).</li>
+  <li><b><code>EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL</code></b>: la consola de texto. Se declaran todos sus campos en orden; los que no se usan quedan como <code>void*</code> para conservar las posiciones.</li>
+  <li><b><code>EFI_SIMPLE_TEXT_INPUT_PROTOCOL</code></b>: el teclado, con el evento <code>WaitForKey</code>.</li>
+  <li><b><code>EFI_BOOT_SERVICES</code></b>: declarada hasta <code>SetWatchdogTimer</code>, la última función usada. Las 30 funciones anteriores se declaran todas, porque C ubica cada puntero por su posición en la tabla.</li>
+  <li><b><code>EFI_SYSTEM_TABLE</code></b>: la tabla raíz con <code>FirmwareVendor</code>, <code>ConIn</code>, <code>ConOut</code> y <code>BootServices</code>.</li>
+  <li>Constantes de color y la macro <code>EFI_TEXT_ATTR(fg, bg) = fg | (bg &lt;&lt; 4)</code>.</li>
+</ul>
+<div class="warn"><b>El orden de los campos importa</b>
+Si se omitiera un campo de <code>EFI_BOOT_SERVICES</code>, el puntero <code>SetWatchdogTimer</code> apuntaría en realidad a otra función del firmware y el programa haría algo imprevisible. Las estructuras se copiaron de la especificación respetando cada posición.</div>
+
+<h2>4.2 main.c: ciclo de vida del programa</h2>
+<div class="diagram vflow">
+  <div class="box"><b>1. El firmware llama a efi_main(ImageHandle, SystemTable)</b></div><div class="arrow">&darr;</div>
+  <div class="box"><b>2. SetWatchdogTimer(0, ...)</b>desactiva el temporizador de 5 minutos que el boot manager arma antes de cada aplicación; si venciera, el firmware reiniciaría el equipo</div><div class="arrow">&darr;</div>
+  <div class="box"><b>3. SetAttribute + ClearScreen + EnableCursor(0)</b>fondo azul en toda la pantalla, cursor oculto</div><div class="arrow">&darr;</div>
+  <div class="box"><b>4. OutputString (varias veces, con colores)</b>marco, título, descripción, autor y SystemTable-&gt;FirmwareVendor</div><div class="arrow">&darr;</div>
+  <div class="box"><b>5. ConIn-&gt;Reset, WaitForEvent(WaitForKey), ReadKeyStroke</b>espera una tecla sin consumir CPU</div><div class="arrow">&darr;</div>
+  <div class="box"><b>6. Restaura colores y cursor, return EFI_SUCCESS</b>el control vuelve al boot manager, que prueba la siguiente opción (p. ej. Windows)</div>
+</div>
+<pre><code><span class="c">/* Fragmento de main.c */</span>
+<span class="k">EFI_STATUS EFIAPI</span> efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
+    out = SystemTable-&gt;ConOut;
+    SystemTable-&gt;BootServices-&gt;SetWatchdogTimer(0, 0, 0, 0);   <span class="c">/* no reset after 5 min */</span>
+    out-&gt;SetAttribute(out, COLOR_TEXT);
+    out-&gt;ClearScreen(out);
+    print(u<span class="s">"                   B A R E B O O T\r\n"</span>, COLOR_TITLE);
+    print(u<span class="s">"  Autor: "</span>, COLOR_LABEL);  print(u<span class="s">"Sebastian Cohen\r\n\r\n"</span>, COLOR_TEXT);
+    print(u<span class="s">"  Firmware: "</span>, COLOR_LABEL); print(SystemTable-&gt;FirmwareVendor, COLOR_TEXT);
+    wait_for_key(SystemTable);
+    <span class="k">return</span> EFI_SUCCESS;                                        <span class="c">/* back to the firmware */</span>
+}</code></pre>
+<div class="tip"><b>Programa no destructivo</b>
+El programa no lee ni escribe ningún disco: solo usa la consola de texto, el teclado y el temporizador. Al terminar devuelve el control al firmware sin alterar el equipo, como exige la regla &ldquo;Programa no destructivo&rdquo;.</div>
+
+<h2>4.3 Compilación</h2>
+<p><code>boot/build.ps1</code> compila con LLVM, sin bibliotecas del sistema:</p>
+<table>
+  <tr><th>Opción</th><th>Para qué</th></tr>
+  <tr><td><code>-target x86_64-unknown-windows</code></td><td>Genera objetos COFF que el enlazador convierte en PE32+, el formato que exige UEFI.</td></tr>
+  <tr><td><code>-ffreestanding</code></td><td>No hay sistema operativo ni biblioteca estándar.</td></tr>
+  <tr><td><code>-fshort-wchar</code></td><td><code>wchar_t</code> de 16 bits, coherente con UTF-16.</td></tr>
+  <tr><td><code>-mno-red-zone</code></td><td>No usar la zona roja de la pila: el firmware puede usar interrupciones.</td></tr>
+  <tr><td><code>-mno-stack-arg-probe</code></td><td>Evita llamadas a <code>__chkstk</code>, que solo existe en Windows.</td></tr>
+  <tr><td><code>-fno-stack-protector</code></td><td>Sin protección de pila, que depende del SO.</td></tr>
+  <tr><td><code>-subsystem:efi_application</code></td><td>Marca el ejecutable como aplicación UEFI (Subsystem = 10).</td></tr>
+  <tr><td><code>-entry:efi_main</code></td><td>Punto de entrada.</td></tr>
+  <tr><td><code>-nodefaultlib</code></td><td>No enlaza ninguna biblioteca de Windows.</td></tr>
+  <tr><td><code>/Brepro</code></td><td>Compilación reproducible: no escribe la fecha en el encabezado PE.</td></tr>
+</table>
+<p>El resultado ocupa 3072 bytes. Su encabezado muestra <code>MZ</code>, la firma <code>PE</code>, <code>Machine = 0x8664</code> (x86-64), <code>Magic = 0x020B</code> (PE32+) y <code>Subsystem = 10</code>.</p>
+
+<!-- ===================================================== 5 -->
+<h1>5. La herramienta preparadora (Go)</h1>
+
+<h2>5.1 Interfaz de línea de comandos</h2>
+<table>
+  <tr><th>Comando</th><th>Qué hace</th><th>Permisos</th></tr>
+  <tr><td><code>preparer list</code></td><td>Lista los discos físicos con identificador, bus, capacidad, modelo, serial y volúmenes, y dice si cada uno se puede usar o por qué se rechaza.</td><td>Ninguno en Windows; root en Linux para ver todo</td></tr>
+  <tr><td><code>preparer image [-o archivo] [-efi programa]</code></td><td>Escribe el medio completo en un archivo de imagen de 66 MiB.</td><td>Ninguno</td></tr>
+  <tr><td><code>preparer write -disk ID</code></td><td>Prepara una USB: comprobaciones, resumen, confirmación tecleada, escritura con progreso, sincronización y verificación.</td><td>Administrador / root</td></tr>
+  <tr><td><code>preparer verify -disk ID</code><br><code>preparer verify -image archivo</code></td><td>Comprueba, sin escribir nada, que un disco o una imagen sea un medio bareboot válido con exactamente el programa compilado.</td><td>Root para discos</td></tr>
+</table>
+<p>Códigos de salida: <code>0</code> éxito, <code>1</code> error en la operación, <code>2</code> uso incorrecto. La identificación de disco es <code>1</code> o <code>PhysicalDrive1</code> en Windows y <code>sde</code> o <code>/dev/sde</code> en Linux.</p>
+
+<h2>5.2 Paquete gpt</h2>
+<h3>Escritura (gpt.go, guid.go)</h3>
+<p><code>Table.Write(w io.WriterAt)</code> valida la tabla (número de particiones, que cada una esté dentro de la zona usable, nombres de hasta 36 caracteres) y escribe cinco bloques:</p>
+<table>
+  <tr><th>Orden</th><th>Bloque</th><th>Posición</th></tr>
+  <tr><td>1</td><td>Copia de respaldo de las entradas</td><td>último LBA &minus; 32</td></tr>
+  <tr><td>2</td><td>Encabezado de respaldo</td><td>último LBA</td></tr>
+  <tr><td>3</td><td>Entradas principales</td><td>LBA 2&ndash;33</td></tr>
+  <tr><td>4</td><td>Encabezado principal</td><td>LBA 1</td></tr>
+  <tr><td>5</td><td>MBR protector</td><td>LBA 0</td></tr>
+</table>
+<p>El orden es deliberado: lo que valida la tabla (el encabezado principal y el MBR) se escribe al final. Si la escritura se interrumpe, el disco queda <b>sin</b> una tabla válida en lugar de con una tabla a medias que el firmware intente usar.</p>
+<p>El CRC32 del encabezado se calcula sobre sus 92 bytes con el propio campo de CRC en cero, tal como indica la especificación. Los dos encabezados difieren solo en su propia posición, la posición de la copia y dónde empiezan sus entradas. <code>guid.go</code> convierte GUID de texto al formato mixed-endian y genera GUID aleatorios versión 4 con <code>crypto/rand</code>.</p>
+<h3>Lectura (read.go)</h3>
+<p><code>gpt.Read</code> está escrita de forma independiente de <code>Write</code> para poder detectar errores en ella. Comprueba: firma <code>55 AA</code> y tipo <code>0xEE</code> del MBR protector; firma, tamaño y CRC32 de ambos encabezados; que cada copia apunte a la otra; que ambas describan la misma tabla; CRC32 de ambos arreglos de entradas y que sean idénticos; y que cada partición esté en la zona usable.</p>
+
+<h2>5.3 Paquete fat32</h2>
+<h3>Construcción en memoria (dir.go)</h3>
+<p>El sistema de archivos se arma primero como un <b>árbol en memoria</b> de nodos (<code>Node</code>): <code>fs.Root().Mkdir("EFI")</code>, <code>Mkdir("BOOT")</code>, <code>AddFile("BOOTX64.EFI", datos)</code>. <code>shortName</code> convierte los nombres al formato 8.3 y rechaza caracteres inválidos. Para cada carpeta se generan sus entradas de 32 bytes, con <code>.</code> y <code>..</code> en las subcarpetas y la etiqueta de volumen <code>BAREBOOT</code> en la raíz.</p>
+<h3>Escritura (fat32.go)</h3>
+<ol>
+  <li><b>Geometría</b>: el tamaño de la FAT depende del número de clusters y viceversa, así que se calcula iterando hasta que se estabiliza. Para 64 MiB: 32 sectores reservados, dos FAT de 1024 sectores, datos desde el sector 2080, 128&nbsp;992 clusters. Si hubiera menos de 65&nbsp;525 clusters se rechaza.</li>
+  <li><b>Asignación</b>: se recorre el árbol y se asignan clusters consecutivos (raíz = 2, <code>EFI</code> = 3, <code>BOOT</code> = 4, <code>BOOTX64.EFI</code> = 5&ndash;10), construyendo las cadenas en la FAT.</li>
+  <li><b>Escritura</b>: primero los datos de cada nodo (rellenando con ceros el resto de cada cluster), luego las dos FAT completas y por último FSInfo y el sector de arranque, junto con sus copias de respaldo.</li>
+</ol>
+<div class="note"><b>Por qué rellenar con ceros</b>
+Una USB usada contiene datos viejos. Si las FAT o los clusters de carpetas no se limpiaran por completo, esos restos se leerían como archivos fantasma. Todas las escrituras son además múltiplos de 512 bytes en posiciones alineadas, requisito del acceso a discos crudos.</div>
+<h3>Lectura (read.go)</h3>
+<p><code>fat32.ReadFile(r, "EFI/BOOT/BOOTX64.EFI")</code> sigue el mismo camino que el firmware: valida el BPB (firma, salto inicial, 512 bytes por sector, campos de FAT32, mínimo de clusters), carga la FAT #1 y la compara con la #2, recorre los directorios por nombre y sigue la cadena de clusters, con protección contra cadenas que apunten fuera de rango o formen ciclos.</p>
+
+<h2>5.4 Composición del medio: writeMedia</h2>
+<p><code>writeMedia(w, diskSectors, bootProgram)</code> en <code>media.go</code> produce el medio completo:</p>
+<ol>
+  <li>Genera GUID aleatorios para el disco y para la ESP.</li>
+  <li>Construye el árbol <code>\EFI\BOOT\BOOTX64.EFI</code> y escribe el FAT32 a través de <code>io.NewOffsetWriter(w, 2048 &times; 512)</code>, de modo que el paquete fat32 escribe como si la partición empezara en el byte 0.</li>
+  <li>Escribe la GPT con una sola partición ESP de 64 MiB (LBA 2048&ndash;133119) llamada &ldquo;EFI System Partition&rdquo;.</li>
+</ol>
+<p>El FAT32 se escribe antes que la GPT por la misma razón de la sección 5.2: una ejecución interrumpida deja un disco sin tabla válida. La misma función genera el archivo de imagen y prepara la USB; solo cambia el <code>io.WriterAt</code> que recibe y el número de sectores (la copia de la GPT se escribe al final <b>real</b> de cada destino).</p>
+<div class="diagram">
+  <div class="disk">
+    <div class="r-mbr" style="flex:.8">MBR<span class="lba">0</span></div>
+    <div class="r-gpt" style="flex:1.2">GPT +<br>entradas<span class="lba">1&ndash;33</span></div>
+    <div class="r-free" style="flex:.9">libre<span class="lba">34&ndash;2047</span></div>
+    <div class="r-esp" style="flex:4">ESP 64 MiB, FAT32 &ldquo;BAREBOOT&rdquo;<br>\EFI\BOOT\BOOTX64.EFI<span class="lba">2048&ndash;133119</span></div>
+    <div class="r-free" style="flex:4">sin asignar (858 MiB en la USB de prueba)</div>
+    <div class="r-gpt" style="flex:1.2">copia<br>GPT<span class="lba">final</span></div>
+  </div>
+  <p class="small center">Figura 3. Contenido final de la memoria USB de prueba (1&nbsp;888&nbsp;256 sectores).</p>
+</div>
+
+<h2>5.5 Paquete disk: detección y reglas de seguridad</h2>
+<h3>El modelo Disk y las reglas (disk.go)</h3>
+<p>Cada disco se describe con: <code>ID</code>, <code>Path</code>, fabricante, producto, serial, bus, si es removible, tamaño, tamaño de sector, volúmenes montados y si es el disco del sistema. <code>Problems()</code> devuelve <b>todos</b> los motivos por los que un disco no puede usarse:</p>
+<table>
+  <tr><th>Regla</th><th>Motivo</th></tr>
+  <tr><td>Es el disco del sistema</td><td>Contiene el sistema operativo en ejecución.</td></tr>
+  <tr><td>El bus no es USB</td><td>La actividad exige una USB dedicada; descarta discos internos SATA/NVMe y discos virtuales.</td></tr>
+  <tr><td>No reporta modelo ni serial</td><td>No se puede comprobar su identidad.</td></tr>
+  <tr><td>Sin medio o menor de 66 MiB</td><td>Capacidad insuficiente.</td></tr>
+  <tr><td>Sector distinto de 512 bytes</td><td>Las estructuras se calculan para sectores de 512 bytes.</td></tr>
+</table>
+<p>Si no se puede determinar cuál es el disco del sistema, la lista completa falla: sin esa información ningún disco puede declararse seguro. <code>SameDevice()</code> permite detectar si el disco cambió entre la confirmación y la escritura.</p>
+<h3>Backend de Windows (disk_windows.go)</h3>
+<p>Cada disco se abre como <code>\\.\PhysicalDriveN</code> con <b>acceso 0</b> (solo consultas, sin permisos de administrador) y se interroga a su driver con <code>DeviceIoControl</code>:</p>
+<table>
+  <tr><th>Código de control</th><th>Respuesta</th></tr>
+  <tr><td><code>IOCTL_STORAGE_QUERY_PROPERTY</code></td><td><code>STORAGE_DEVICE_DESCRIPTOR</code>: fabricante, producto, serial, <b>BusType</b>, medio removible.</td></tr>
+  <tr><td><code>IOCTL_DISK_GET_DRIVE_GEOMETRY_EX</code></td><td>Tamaño de sector y tamaño total.</td></tr>
+  <tr><td><code>IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS</code></td><td>Para cada letra (<code>GetLogicalDrives</code>), en qué disco físico vive. El disco que contiene <code>%SystemDrive%</code> es el del sistema.</td></tr>
+</table>
+<h3>Backend de Linux (disk_linux.go)</h3>
+<p>Linux publica el hardware como archivos de texto en <code>/sys</code>, así que listar discos consiste en leer archivos:</p>
+<table>
+  <tr><th>Dato</th><th>Fuente</th></tr>
+  <tr><td>Discos</td><td><code>/sys/block/*</code> que tengan el enlace <code>device</code> (descarta loop, ram, zram, dm)</td></tr>
+  <tr><td>Tamaño / sector</td><td><code>/sys/block/sdX/size</code> (unidades de 512) y <code>queue/logical_block_size</code></td></tr>
+  <tr><td>Modelo</td><td><code>/sys/block/sdX/device/vendor</code> y <code>model</code></td></tr>
+  <tr><td>Bus</td><td>La ruta real del enlace: <code>.../usb1/1-1/.../block/sde</code> contiene <code>/usb</code></td></tr>
+  <tr><td>Serial</td><td>Archivo <code>serial</code> del nodo USB (el primer padre con <code>idVendor</code>)</td></tr>
+  <tr><td>Montajes / sistema</td><td><code>/proc/self/mountinfo</code>; el disco que tiene montado <code>/</code> es el del sistema</td></tr>
+</table>
+
+<h2>5.6 Escritura en el dispositivo</h2>
+<p><code>disk.Writer</code> implementa la misma operación en los dos sistemas operativos:</p>
+<table>
+  <tr><th>Paso</th><th>Windows (writer_windows.go)</th><th>Linux (writer_linux.go)</th><th>Por qué</th></tr>
+  <tr><td>Permisos</td><td>Token elevado (administrador)</td><td><code>geteuid() == 0</code> (root)</td><td>Solo el superusuario escribe discos crudos.</td></tr>
+  <tr><td>Liberar volúmenes</td><td><code>FSCTL_LOCK_VOLUME</code> + <code>FSCTL_DISMOUNT_VOLUME</code> (5 reintentos)</td><td><code>umount2</code></td><td>El sistema de archivos viejo no debe seguir activo ni con caché mientras se escribe debajo.</td></tr>
+  <tr><td>Abrir</td><td><code>CreateFile(GENERIC_READ|WRITE, FILE_FLAG_WRITE_THROUGH)</code></td><td><code>open(O_RDWR | O_EXCL | O_SYNC)</code></td><td><code>O_EXCL</code> hace que el núcleo rechace la apertura si algo sigue montado.</td></tr>
+  <tr><td>Escribir / leer</td><td><code>WriteFile</code> / <code>ReadFile</code> con posición</td><td><code>pwrite</code> / <code>pread</code></td><td>Escritura en posiciones exactas.</td></tr>
+  <tr><td>Asegurar</td><td><code>FlushFileBuffers</code></td><td><code>fsync</code></td><td>Que nada quede en caché.</td></tr>
+  <tr><td>Releer sin caché</td><td>(no aplica)</td><td><code>ioctl(BLKFLSBUF)</code></td><td>Que la verificación lea el dispositivo, no la RAM.</td></tr>
+  <tr><td>Avisar al núcleo</td><td><code>IOCTL_DISK_UPDATE_PROPERTIES</code></td><td><code>ioctl(BLKRRPART)</code></td><td>Que relea la nueva tabla de particiones.</td></tr>
+</table>
+<p><code>Explain()</code> traduce los códigos de error del sistema (<code>ERROR_ACCESS_DENIED</code>, <code>EACCES</code>, <code>EBUSY</code>, <code>EROFS</code>, <code>ENODEV</code>, <code>EIO</code>, <code>EINVAL</code>&hellip;) a mensajes que indican qué hacer: ejecutar como administrador, cerrar programas, revisar el interruptor de protección, la USB se desconectó, fallo del dispositivo, acceso desalineado.</p>
+
+<h2>5.7 El comando write paso a paso</h2>
+<div class="diagram vflow">
+  <div class="box"><b>1. ¿Administrador / root?</b>si no, termina con instrucciones</div><div class="arrow">&darr;</div>
+  <div class="box"><b>2. Información actual del disco + reglas de seguridad</b>si hay algún problema, los lista todos y termina sin escribir</div><div class="arrow">&darr;</div>
+  <div class="box"><b>3. Resumen</b>disco, modelo, serial, bus, capacidad, volúmenes, qué se escribirá y advertencia de pérdida de datos</div><div class="arrow">&darr;</div>
+  <div class="box warm"><b>4. Confirmación explícita</b>hay que teclear exactamente &ldquo;ERASE DISK sde&rdquo;; cualquier otra cosa cancela</div><div class="arrow">&darr;</div>
+  <div class="box"><b>5. Nueva consulta del disco: ¿sigue siendo el mismo dispositivo?</b></div><div class="arrow">&darr;</div>
+  <div class="box"><b>6. Liberar volúmenes y abrir el disco</b>desde aquí Ctrl+C se convierte en cancelación controlada</div><div class="arrow">&darr;</div>
+  <div class="box"><b>7. [1/3] Escritura con barra de progreso</b> (conteo previo en seco del total de bytes)</div><div class="arrow">&darr;</div>
+  <div class="box"><b>8. [2/3] Sincronización</b>fsync / FlushFileBuffers + descarte de la caché</div><div class="arrow">&darr;</div>
+  <div class="box alt"><b>9. [3/3] Verificación</b>relectura byte a byte + verificación estructural</div><div class="arrow">&darr;</div>
+  <div class="box alt"><b>10. &ldquo;prepared and verified&rdquo;</b> &mdash; o, ante cualquier error, &ldquo;did NOT complete and is NOT verified&rdquo;</div>
+</div>
+<p>La cancelación usa <code>signal.NotifyContext</code>: <code>progressWriter</code> revisa el contexto antes de cada escritura y se detiene entre dos escrituras en lugar de matar el proceso a mitad de una. Como la GPT se escribe al final, una preparación cancelada deja la USB sin tabla válida y el firmware ni siquiera intentará arrancarla.</p>
+
+<h2>5.8 Verificación</h2>
+<table class="avoid">
+  <tr><th></th><th>Relectura (verifyWritten)</th><th>Estructural (verifyStructure)</th></tr>
+  <tr><td>Pregunta</td><td>¿El dispositivo guardó lo que se le envió?</td><td>¿El resultado es un disco booteable correcto?</td></tr>
+  <tr><td>Cómo</td><td><code>recordingWriter</code> guarda una copia de cada escritura; tras sincronizar se releen esas posiciones y se comparan byte a byte</td><td><code>gpt.Read</code> + búsqueda de la ESP + <code>fat32.ReadFile</code> + comparación con el programa fuente</td></tr>
+  <tr><td>Detecta</td><td>USB defectuosa o falsificada, escrituras perdidas, caché que no se vació</td><td>Errores de concepto en el código: CRC mal calculado, campo mal escrito, cadena rota</td></tr>
+</table>
+<p>Se necesitan las dos: si <code>Write</code> tuviera un error, la relectura solo confirmaría ese mismo error. Por eso la verificación estructural interpreta el disco desde cero, como lo haría el firmware.</p>
+
+<!-- ===================================================== 6 -->
+<h1>6. Entorno, scripts y pruebas virtuales</h1>
+
+<h2>6.1 Herramientas</h2>
+<table>
+  <tr><th>Herramienta</th><th>Versión usada</th><th>Uso</th></tr>
+  <tr><td>LLVM (clang, lld-link)</td><td>23.1.6</td><td>Compilar el programa de arranque</td></tr>
+  <tr><td>Go</td><td>1.27.4</td><td>Herramienta preparadora (compilación nativa y cruzada a Linux)</td></tr>
+  <tr><td>QEMU + EDK II (OVMF)</td><td>11.1.0</td><td>Máquina virtual con firmware UEFI</td></tr>
+  <tr><td>WSL 2 (Ubuntu)</td><td>kernel 6.18</td><td>Ejecutar la versión Linux de la herramienta y verificadores</td></tr>
+  <tr><td>usbipd-win</td><td>5.3.0</td><td>Pasar la USB de Windows a WSL</td></tr>
+  <tr><td>gdisk, dosfstools, mtools (en WSL)</td><td>&mdash;</td><td>Verificación independiente: <code>sgdisk</code>, <code>fsck.vfat</code>, <code>mdir</code>, <code>mtype</code></td></tr>
+  <tr><td>golang.org/x/sys</td><td>v0.50.0</td><td>Acceso a la API de Windows y a syscalls de Linux desde Go</td></tr>
+</table>
+
+<h2>6.2 Scripts</h2>
+<table>
+  <tr><th>Script</th><th>Qué hace</th></tr>
+  <tr><td><code>boot\build.ps1</code></td><td>Compila <code>main.c</code> y deja <code>BOOTX64.EFI</code> en <code>build\esp\EFI\BOOT\</code>.</td></tr>
+  <tr><td><code>scripts\build-image.ps1</code></td><td>Compila el programa, compila la herramienta para Linux (<code>GOOS=linux</code>) y Windows, y genera <code>build\bareboot.img</code> ejecutando la versión Linux dentro de WSL.</td></tr>
+  <tr><td><code>scripts\verify-image.ps1</code></td><td>Verifica la imagen con herramientas que no forman parte del proyecto: <code>sgdisk -v</code>, tipo ESP, <code>fsck.vfat -n</code>, árbol de archivos con <code>mdir</code> y SHA-256 del programa con <code>mtype</code>.</td></tr>
+  <tr><td><code>scripts\run-qemu.ps1</code></td><td>Arranca una imagen en QEMU con el firmware UEFI de QEMU (código en <i>pflash</i> de solo lectura, variables en <code>build\vars.fd</code>).</td></tr>
+  <tr><td><code>scripts\preparer.ps1</code></td><td>Ejecuta <code>build/preparer-linux</code> en WSL como root (<code>wsl -u root</code>), equivalente a &ldquo;ejecutar como administrador&rdquo;.</td></tr>
+</table>
+
+<h2>6.3 Por qué la escritura física se hace desde WSL</h2>
+<p>La herramienta compila y funciona en Windows. Sin embargo, el equipo de desarrollo tiene activado <b>Smart App Control</b>, una protección de Windows 11 que bloquea ejecutables sin firma digital cuando su modelo de reputación los considera peligrosos. Un programa nuevo, sin firmar, que bloquea volúmenes y sobrescribe sectores crudos coincide con el perfil de un malware que destruye discos, y fue bloqueado.</p>
+<p>La solución fue agregar el backend de Linux y ejecutar la herramienta dentro de <b>WSL 2</b>, la máquina virtual Linux integrada en Windows. Smart App Control solo analiza ejecutables de Windows; el binario ELF de Linux lo ejecuta el núcleo de Linux de la máquina virtual. Con <b>usbipd-win</b> la USB se desconecta de Windows y se conecta a esa máquina virtual, que la ve como <code>/dev/sde</code>.</p>
+<div class="diagram flow">
+  <div class="box warm"><b>Windows + Smart App Control</b>preparer.exe bloqueado</div><div class="arrow">&rarr;</div>
+  <div class="box gray"><b>usbipd-win</b>&ldquo;cable USB por red&rdquo;</div><div class="arrow">&rarr;</div>
+  <div class="box alt"><b>WSL 2 (núcleo Linux)</b>preparer-linux &rarr; /dev/sde</div>
+</div>
+<p>No se desactivó ninguna protección de Windows. En un equipo sin Smart App Control, <code>preparer.exe write -disk 1</code> ejecutado como administrador hace exactamente lo mismo con la API de Windows.</p>
+
+<h2>6.4 Pruebas virtuales con QEMU</h2>
+<p>QEMU emula un PC completo. Con el firmware EDK II (OVMF) como <i>pflash</i>, la máquina virtual arranca igual que un equipo UEFI real: lee la GPT de la imagen, encuentra la ESP, abre <code>\EFI\BOOT\BOOTX64.EFI</code> y lo ejecuta. Al pulsar una tecla, el programa retorna y el boot manager, sin más opciones, abre su menú de configuración (<i>UiApp</i>). Antes de la prueba física se copió la USB completa a un archivo y se arrancó en QEMU, de modo que se probó exactamente lo grabado en la memoria.</p>
+
+<!-- ===================================================== 7 -->
+<h1>7. Desarrollo paso a paso</h1>
+<p>El proyecto se construyó en once pasos. Cada uno terminó probado y en un commit (Conventional Commits, en inglés).</p>
+<table>
+  <tr><th>Paso</th><th>Qué se hizo</th><th>Commit</th></tr>
+  <tr><td>1</td><td>Análisis del firmware del equipo (UEFI, sin CSM, Secure Boot desactivable), elección de la ruta UEFI, instalación de LLVM, QEMU, Go y Git.</td><td>&mdash;</td></tr>
+  <tr><td>2</td><td>&ldquo;Hola mundo&rdquo; UEFI: <code>efi.h</code> mínimo, <code>main.c</code>, scripts de compilación y QEMU.</td><td><code>ad417aa</code></td></tr>
+  <tr><td>3</td><td>Banner con colores, desactivación del watchdog, espera de tecla y retorno al firmware.</td><td><code>7e59c4b</code></td></tr>
+  <tr><td>4</td><td>Paquete <code>gpt</code>: MBR protector, encabezados y entradas con CRC32; imagen verificada con <code>sgdisk</code>.</td><td><code>680c554</code></td></tr>
+  <tr><td>5</td><td>Paquete <code>fat32</code> y <code>writeMedia</code>: primera imagen booteable generada íntegramente por el proyecto.</td><td><code>92b77c8</code></td></tr>
+  <tr><td>6</td><td>Scripts de construcción, verificación externa y arranque de la imagen en QEMU.</td><td><code>52af028</code></td></tr>
+  <tr><td>7</td><td>Paquete <code>disk</code>: detección de discos en Windows, reglas de seguridad, comando <code>list</code>.</td><td><code>0548275</code></td></tr>
+  <tr><td>8</td><td>Comando <code>write</code> (confirmación, bloqueo, escritura, progreso) y backend de Linux por el bloqueo de Smart App Control. Primera USB grabada.</td><td><code>3d05b56</code></td></tr>
+  <tr><td>9</td><td>Verificación por relectura y estructural, comando <code>verify</code>, cancelación con Ctrl+C, compilación reproducible.</td><td><code>281af6b</code></td></tr>
+  <tr><td>10</td><td>Nombre del autor en el banner, prueba de la USB física en QEMU y <b>arranque en el equipo real</b>.</td><td><code>a5acbfd</code></td></tr>
+  <tr><td>11</td><td>Documentación.</td><td>&mdash;</td></tr>
+</table>
+
+<!-- ===================================================== 8 -->
+<h1>8. Pruebas y evidencia</h1>
+
+<h2>8.1 Detección de discos</h2>
+<pre class="out">DISK  BUS   SIZE       MODEL                 VOLUMES  STATUS
+sda   SCSI  722.9 MiB  Msft Virtual Disk     -        REJECTED: not a USB disk (bus: SCSI)
+sdd   SCSI  1.0 TiB    Msft Virtual Disk     /        REJECTED: system disk (holds the running OS);
+                                                       not a USB disk (bus: SCSI)
+<span class="g">sde   USB   922.0 MiB  Generic Mass-Storage  -        OK - can be used</span></pre>
+<p class="small">Salida resumida de <code>preparer list</code> en WSL. En Windows, el disco 0 (NVMe, C:) aparece rechazado como disco del sistema y la USB como disco 1.</p>
+
+<h2>8.2 Preparación de la USB</h2>
+<pre class="out">Type "ERASE DISK sde" to continue, or anything else to cancel: ERASE DISK sde
+Releasing the volumes of disk sde (lock/unmount)...
+[1/3] Writing boot media...
+  [##############################] 100%  1.0 MiB / 1.0 MiB
+[2/3] Flushing pending writes to the device...
+[3/3] Verifying...
+<span class="g">  [OK  ] read-back: 1.0 MiB in 15 regions identical to what was written
+  [OK  ] GPT: protective MBR, primary and backup headers and entries valid (CRC32)
+  [OK  ] ESP: "EFI System Partition", LBA 2048-133119 (64.0 MiB)
+  [OK  ] FAT32: boot sector and both FATs valid, \EFI\BOOT\BOOTX64.EFI found
+  [OK  ] boot program: 3072 bytes, identical to the source file</span>
+Done: disk sde prepared and verified (1.0 MiB written).</pre>
+<p>Las 15 regiones son: 5 de la GPT, 4 de datos (raíz, <code>EFI</code>, <code>BOOT</code>, el programa), 2 FAT y 4 sectores de arranque del FAT32 (sector de arranque, FSInfo y sus respaldos).</p>
+
+<h2>8.3 Verificación independiente</h2>
+<table>
+  <tr><th>Herramienta externa</th><th>Resultado sobre la USB</th></tr>
+  <tr><td><code>sgdisk -v /dev/sde</code></td><td>No problems found</td></tr>
+  <tr><td><code>lsblk</code></td><td><code>sde1</code>: 64 MiB, vfat, etiqueta BAREBOOT, tipo EFI System</td></tr>
+  <tr><td><code>fsck.vfat -n /dev/sde1</code></td><td>4 files, 9/128992 clusters, sin errores</td></tr>
+  <tr><td><code>mdir</code> + <code>sha256sum</code></td><td><code>\EFI\BOOT\BOOTX64.EFI</code> presente, hash idéntico al compilado</td></tr>
+</table>
+
+<h2>8.4 Detección de corrupción</h2>
+<p>Para comprobar que la verificación no aprueba cualquier cosa, se dañó un solo byte en copias de la imagen:</p>
+<table>
+  <tr><th>Byte alterado</th><th>Resultado de <code>preparer verify</code></th></tr>
+  <tr><td>Encabezado GPT principal</td><td><span class="pill bad">FAIL</span> primary header: header CRC32 mismatch</td></tr>
+  <tr><td>Encabezado GPT de respaldo</td><td><span class="pill bad">FAIL</span> backup header: header CRC32 mismatch</td></tr>
+  <tr><td>Arreglo de entradas</td><td><span class="pill bad">FAIL</span> entry array CRC32 mismatch</td></tr>
+  <tr><td>Sectores por cluster del BPB</td><td><span class="pill bad">FAIL</span> 8 sectors per cluster, expected 1</td></tr>
+  <tr><td>Solo la FAT #1</td><td><span class="pill bad">FAIL</span> FAT #2 differs from FAT #1</td></tr>
+  <tr><td>Un byte de BOOTX64.EFI</td><td><span class="pill bad">FAIL</span> BOOTX64.EFI on the media differs from the boot program</td></tr>
+</table>
+
+<h2>8.5 Arranque</h2>
+<div class="two">
+  <figure><img src="img/qemu-banner.png" alt=""><figcaption>Figura 4. Copia exacta de la USB arrancada en QEMU (requisito 9).</figcaption></figure>
+  <figure><img src="img/arranque-real.jpg" alt=""><figcaption>Figura 5. Arranque físico en el Lenovo V14 G4, firmware Phoenix (requisito 10).</figcaption></figure>
+</div>
+<p>Procedimiento seguido en el equipo real: suspensión de BitLocker tras verificar la clave de recuperación, Secure Boot desactivado, arranque desde la USB con el menú de arranque del firmware, banner mostrado, Secure Boot reactivado y protección de BitLocker reactivada. El estado final se comprobó: Secure Boot activo y BitLocker protegido.</p>
+
+<!-- ===================================================== 9 -->
+<h1>9. Correspondencia con los requisitos de la actividad</h1>
+<h2>9.1 Qué debe hacer</h2>
+<table>
+  <tr><th style="width:26%">Requisito</th><th>Cómo se cumple</th></tr>
+  <tr><td>1. Programa de arranque propio</td><td><code>boot/main.c</code>: código del autor con resultado visible (banner con nombre del autor) que se ejecuta sin sistema operativo.</td></tr>
+  <tr><td>2. Tipo de arranque</td><td>UEFI, compatible con el equipo de prueba (solo UEFI). Aplicación PE32+ x86-64.</td></tr>
+  <tr><td>3. Construcción del medio</td><td><code>writeMedia</code>: GPT + ESP FAT32 + <code>\EFI\BOOT\BOOTX64.EFI</code>, la estructura que el firmware necesita para localizar el programa.</td></tr>
+  <tr><td>4. Preparador propio</td><td>La herramienta selecciona la USB y crea las estructuras con código propio (paquetes <code>gpt</code> y <code>fat32</code>), sin formateador del SO ni grabador externo.</td></tr>
+  <tr><td>5. Identificación del destino</td><td><code>list</code> y el resumen de <code>write</code> muestran identificador, bus, capacidad, modelo, serial y volúmenes; <code>Problems()</code> verifica que sea una USB válida.</td></tr>
+  <tr><td>6. Confirmación de sobrescritura</td><td>Advertencia de pérdida total de datos y frase tecleada <code>ERASE DISK &lt;id&gt;</code>.</td></tr>
+  <tr><td>7. Progreso y resultado</td><td>Barra de progreso, sincronización (<code>fsync</code>/<code>FlushFileBuffers</code>), relectura byte a byte y verificación estructural.</td></tr>
+  <tr><td>8. Manejo de errores</td><td>Mensajes específicos para falta de permisos, destino no válido, desconexión, capacidad insuficiente, fallo de escritura o verificación; nunca se declara éxito si algo falló.</td></tr>
+  <tr><td>9. Prueba virtual</td><td>QEMU + firmware UEFI con la imagen generada y con una copia exacta de la USB física.</td></tr>
+  <tr><td>10. Arranque físico</td><td>Lenovo V14 G4, firmware Phoenix: banner mostrado (Figura 5).</td></tr>
+</table>
+<h2>9.2 Reglas de implementación</h2>
+<table>
+  <tr><th style="width:26%">Regla</th><th>Cómo se cumple</th></tr>
+  <tr><td>Código de arranque propio</td><td>El comportamiento visible proviene de <code>main.c</code>; no se usa ninguna imagen de sistema operativo.</td></tr>
+  <tr><td>Preparación propia</td><td>Particionado, formateo, escritura, sincronización y verificación los hace la herramienta.</td></tr>
+  <tr><td>Syscalls y firmware</td><td>Herramienta: API Win32 y syscalls de Linux. Programa: servicios UEFI (sección 2.8).</td></tr>
+  <tr><td>Formato coherente</td><td>GPT con ESP del tipo correcto y FAT32 válido; no se copia un ejecutable a una unidad formateada por el SO.</td></tr>
+  <tr><td>Compatibilidad comprobada</td><td>Equipo UEFI; Secure Boot desactivado temporalmente solo en el equipo propio y restaurado al terminar.</td></tr>
+  <tr><td>Destino seguro</td><td>USB dedicada; rechazo del disco del sistema, de discos no USB y de discos sin identidad; confirmación; nueva comprobación de identidad antes de escribir.</td></tr>
+  <tr><td>Escritura completa</td><td>Errores atendidos, sincronización, relectura y cierre de archivos y dispositivos; una preparación interrumpida se informa como no completada.</td></tr>
+  <tr><td>Programa no destructivo</td><td>El programa de arranque no accede a ningún disco.</td></tr>
+</table>
+
+<!-- ===================================================== 10 -->
+<h1>10. Problemas encontrados y soluciones</h1>
+<table>
+  <tr><th style="width:24%">Problema</th><th>Causa</th><th>Solución</th></tr>
+  <tr><td>El ejecutable de Windows de la herramienta es bloqueado</td><td>Smart App Control considera peligroso un programa sin firma que escribe discos crudos.</td><td>Backend de Linux ejecutado en WSL 2 con la USB pasada por usbipd-win (sección 6.3). No se desactivó la protección.</td></tr>
+  <tr><td>La USB mostraba otro programa que el compilado</td><td>lld-link escribe la fecha en el encabezado PE: cada compilación generaba un archivo distinto.</td><td>Opción <code>/Brepro</code>: compilación reproducible (mismo SHA-256 en cada compilación).</td></tr>
+  <tr><td>El serial de la USB salía como <code>vhci_hcd.0</code></td><td>Al subir por el árbol de sysfs se pasaba del dispositivo USB al controlador virtual de usbipd.</td><td>Detenerse en el primer directorio con <code>idVendor</code>.</td></tr>
+  <tr><td>Herramientas de disco &ldquo;no encontradas&rdquo; en WSL</td><td><code>wsl -e</code> no carga un PATH con <code>/usr/sbin</code>.</td><td>PATH explícito en <code>verify-image.ps1</code>.</td></tr>
+  <tr><td><code>usbipd attach</code> fallaba</td><td>Necesita una sesión de WSL en ejecución.</td><td>Mantener una sesión abierta (<code>wsl -e sleep 3600</code>).</td></tr>
+  <tr><td>Verificación de la imagen colgada</td><td><code>dd bs=512</code> hacía 131&nbsp;072 escrituras pequeñas a través del puente de archivos WSL&ndash;Windows.</td><td>Bloques de 1 MiB con desplazamientos en bytes.</td></tr>
+  <tr><td><code>gofmt</code> marcaba archivos correctos</td><td>Finales de línea CRLF.</td><td><code>gofmt -w</code>; el repositorio guarda LF.</td></tr>
+  <tr><td>Riesgo de bloqueo por BitLocker</td><td>Cambiar Secure Boot altera las mediciones del TPM.</td><td>Verificar la clave de recuperación, suspender la protección y reactivarla al final.</td></tr>
+</table>
+
+<!-- ===================================================== 11 -->
+<h1>11. Glosario</h1>
+<table>
+  <tr><th style="width:22%">Término</th><th>Definición</th></tr>
+  <tr><td>BPB</td><td>BIOS Parameter Block: estructura en el sector 0 de un volumen FAT que describe su geometría.</td></tr>
+  <tr><td>Boot manager</td><td>Parte del firmware que elige y ejecuta el programa de arranque según las opciones configuradas.</td></tr>
+  <tr><td>Cluster</td><td>Unidad mínima de asignación de espacio de un sistema de archivos FAT.</td></tr>
+  <tr><td>CRC32</td><td>Código de comprobación de 32 bits usado por GPT para detectar alteraciones.</td></tr>
+  <tr><td>CSM</td><td>Compatibility Support Module: modo de compatibilidad BIOS dentro de un firmware UEFI.</td></tr>
+  <tr><td>ESP</td><td>EFI System Partition: partición FAT donde el firmware busca programas de arranque.</td></tr>
+  <tr><td>FAT</td><td>File Allocation Table: tabla que encadena los clusters de cada archivo.</td></tr>
+  <tr><td>Firmware</td><td>Software almacenado en la placa base que se ejecuta al encender el equipo.</td></tr>
+  <tr><td>GPT</td><td>GUID Partition Table: esquema de particiones de la especificación UEFI.</td></tr>
+  <tr><td>GUID</td><td>Identificador global único de 128 bits.</td></tr>
+  <tr><td>IOCTL</td><td>Operación de control enviada a un driver (Windows: <code>DeviceIoControl</code>; Linux: <code>ioctl</code>).</td></tr>
+  <tr><td>LBA</td><td>Logical Block Address: número de sector de un disco.</td></tr>
+  <tr><td>OVMF / EDK II</td><td>Implementación de firmware UEFI de código abierto usada por QEMU.</td></tr>
+  <tr><td>PE32+</td><td>Formato de ejecutable de 64 bits de Windows, usado también por las aplicaciones UEFI.</td></tr>
+  <tr><td>Secure Boot</td><td>Función UEFI que solo ejecuta programas de arranque firmados con claves confiables.</td></tr>
+  <tr><td>Smart App Control</td><td>Protección de Windows 11 que bloquea ejecutables sin firma de reputación desconocida.</td></tr>
+  <tr><td>Syscall</td><td>Llamada al sistema: petición de un programa al núcleo del sistema operativo.</td></tr>
+  <tr><td>System Table</td><td>Estructura que el firmware UEFI entrega al programa con acceso a todos sus servicios.</td></tr>
+  <tr><td>TPM</td><td>Trusted Platform Module: chip que guarda claves y mide el proceso de arranque.</td></tr>
+  <tr><td>usbipd-win</td><td>Herramienta que comparte dispositivos USB de Windows con WSL mediante USB/IP.</td></tr>
+  <tr><td>Watchdog</td><td>Temporizador que reinicia el equipo si una aplicación UEFI no termina a tiempo.</td></tr>
+  <tr><td>WSL 2</td><td>Windows Subsystem for Linux: máquina virtual ligera con núcleo Linux integrada en Windows.</td></tr>
+</table>
+
+<!-- ===================================================== 12 -->
+<h1>12. Referencias</h1>
+<ol>
+  <li>UEFI Forum. <i>Unified Extensible Firmware Interface (UEFI) Specification</i>, versión 2.x: capítulos de System Table, Boot Services, protocolos de consola y GUID Partition Table.</li>
+  <li>Microsoft. <i>FAT: General Overview of On-Disk Format</i> (Microsoft Extensible Firmware Initiative FAT32 File System Specification).</li>
+  <li>Microsoft Learn. Documentación de <code>CreateFile</code>, <code>DeviceIoControl</code>, <code>IOCTL_STORAGE_QUERY_PROPERTY</code>, <code>IOCTL_DISK_GET_DRIVE_GEOMETRY_EX</code>, <code>IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS</code>, <code>FSCTL_LOCK_VOLUME</code> y <code>FSCTL_DISMOUNT_VOLUME</code>.</li>
+  <li>The Linux Kernel documentation. <i>sysfs</i> y la interfaz de dispositivos de bloque (<code>BLKRRPART</code>, <code>BLKFLSBUF</code>); páginas de manual de <code>open(2)</code>, <code>fsync(2)</code>, <code>umount2(2)</code>.</li>
+  <li>Documentación de QEMU y del proyecto TianoCore EDK II (OVMF).</li>
+  <li>Documentación de usbipd-win y de WSL 2.</li>
+  <li>Actividad &ldquo;USB booteable con programa propio&rdquo;, Sistemas Operativos, Universidad Rafael Urdaneta.</li>
+</ol>
+
+</body>
+</html>
